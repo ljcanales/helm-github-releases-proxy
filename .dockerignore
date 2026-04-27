@@ -1,0 +1,5 @@
+# Ignore everything
+*
+# Re-include only what is needed
+!app/
+!requirements.txt
