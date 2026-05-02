@@ -49,10 +49,7 @@ class ChartReleaserIndexRewriter:
 
     def _rewrite_url(self, url: str) -> str:
         tag, filename = self._parse_release_download_url(url)
-        return (
-            f"{self._settings.chart_base_url}/charts/"
-            f"{quote(tag, safe='')}/{quote(filename, safe='')}"
-        )
+        return f"charts/{quote(tag, safe='')}/{quote(filename, safe='')}"
 
     def _parse_release_download_url(self, url: str) -> tuple[str, str]:
         parsed = urlparse(url)

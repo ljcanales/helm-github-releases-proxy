@@ -10,8 +10,8 @@ The proxy solves two common gaps:
 
 - GitHub Releases are convenient for storing chart archives, but they do not
   expose a Helm-compatible repository API by themselves.
-- Private repositories, release assets, and generated chart URLs often need a
-  stable service URL instead of direct GitHub download URLs.
+- Private repositories and release assets often need a Helm-compatible proxy
+  instead of direct GitHub download URLs.
 
 The app exposes `/index.yaml` and `/charts/...` routes, reads from one GitHub
 repository, and streams chart downloads through the proxy.
@@ -38,10 +38,10 @@ ending in `.tgz`, derives chart name and version from asset names, and generates
 Helm repository YAML. Chart URLs are generated as:
 
 ```text
-{APP_BASE_URL}/charts/{asset_id}/{filename}
+charts/{asset_id}/{filename}
 ```
 
-When `APP_BASE_URL` is empty, URLs use `http://localhost:{APP_PORT}`.
+Helm resolves these chart URLs relative to `index.yaml`.
 
 Chart asset filenames must follow:
 
@@ -75,7 +75,7 @@ https://github.com/{owner}/{repo}/releases/download/{tag}/{filename}
 to:
 
 ```text
-{APP_BASE_URL}/charts/{tag}/{filename}
+charts/{tag}/{filename}
 ```
 
 Relative package URLs, such as chart-releaser's `--packages-with-index` output,
@@ -86,7 +86,6 @@ are not supported.
 - `MODE`: `releases-proxy` or `chart-releaser-action-support`; defaults to
   `releases-proxy`
 - `APP_PORT`: port used by Uvicorn; defaults to `8080`
-- `APP_BASE_URL`: public base URL used in generated chart download URLs; defaults to `http://localhost:{APP_PORT}`
 - `GITHUB_OWNER`: GitHub repository owner or organization
 - `GITHUB_REPO`: GitHub repository name
 - `GITHUB_TOKEN`: optional for public repositories; required for private
@@ -96,10 +95,6 @@ are not supported.
 - `CACHE_TTL_SECONDS`: TTL for generated `index.yaml` responses; defaults to
   `60`
 - `LOG_LEVEL`: Python logging level; defaults to `INFO`
-
-Set `APP_BASE_URL` to the URL Helm clients use to reach this service. For
-example, use `https://charts.example.com` behind a reverse proxy, or leave it
-empty for local development where Helm reaches `http://localhost:8080`.
 
 For public repositories, `GITHUB_TOKEN` can be left empty. A token is still
 recommended for higher GitHub API rate limits. For private repositories, use a
@@ -155,7 +150,6 @@ docker build -t helm-github-releases-proxy .
 docker run --rm -p 8080:8080 \
   -e MODE=releases-proxy \
   -e APP_PORT=8080 \
-  -e APP_BASE_URL=http://localhost:8080 \
   -e GITHUB_OWNER=acme \
   -e GITHUB_REPO=charts \
   helm-github-releases-proxy
@@ -174,7 +168,6 @@ services:
     environment:
       MODE: releases-proxy
       APP_PORT: "8080"
-      APP_BASE_URL: http://localhost:8080
       GITHUB_OWNER: my-username
       GITHUB_REPO: my-charts-repository
       GITHUB_TOKEN: github_pat_readonly_token

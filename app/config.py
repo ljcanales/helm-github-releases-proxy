@@ -11,7 +11,6 @@ Mode = Literal["releases-proxy", "chart-releaser-action-support"]
 class Settings(BaseSettings):
     mode: Mode = Field(default="releases-proxy", alias="MODE")
     app_port: int = Field(default=8080, alias="APP_PORT")
-    app_base_url: str = Field(default="", alias="APP_BASE_URL")
     github_owner: str = Field(default="", alias="GITHUB_OWNER")
     github_repo: str = Field(default="", alias="GITHUB_REPO")
     github_token: str = Field(default="", alias="GITHUB_TOKEN")
@@ -27,12 +26,6 @@ class Settings(BaseSettings):
         case_sensitive=False,
         extra="ignore",
     )
-
-    @property
-    def chart_base_url(self) -> str:
-        if self.app_base_url.strip():
-            return self.app_base_url.strip().rstrip("/")
-        return f"http://localhost:{self.app_port}"
 
 
 @lru_cache

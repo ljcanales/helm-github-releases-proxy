@@ -57,7 +57,7 @@ class IndexBuilder:
         return yaml.safe_dump(document, sort_keys=False)
 
     def _build_chart_url(self, asset: GitHubReleaseAsset) -> str:
-        return f"{self._settings.chart_base_url}/charts/{asset.id}/{quote(asset.name, safe='')}"
+        return f"charts/{asset.id}/{quote(asset.name, safe='')}"
 
     def _parse_chart_filename(self, filename: str) -> Mapping[str, str]:
         if not filename.endswith(".tgz"):
