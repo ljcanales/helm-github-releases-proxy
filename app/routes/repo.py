@@ -4,6 +4,7 @@ from fastapi.responses import StreamingResponse
 from app.config import get_settings
 from app.services.cache import get_cache
 from app.services.chart_releaser_index import (
+    BRANCH_PACKAGE_MARKER,
     ChartReleaserIndexError,
     ChartReleaserIndexRewriter,
 )
@@ -51,14 +52,17 @@ async def get_index() -> Response:
     return Response(content=index_yaml, media_type="application/x-yaml")
 
 
-@router.get("/charts/{asset_id_or_tag}/{filename}", tags=["repo"])
+@router.get("/charts/{asset_id_or_tag}/{filename:path}", tags=["repo"])
 async def get_chart(asset_id_or_tag: str, filename: str) -> Response:
     settings = get_settings()
     github_client = GitHubReleasesClient(settings)
 
     try:
         if settings.mode == "chart-releaser-action-support":
-            stream = await github_client.stream_release_download(asset_id_or_tag, filename)
+            if asset_id_or_tag == BRANCH_PACKAGE_MARKER:
+                stream = await github_client.stream_branch_package(filename)
+            else:
+                stream = await github_client.stream_release_download(asset_id_or_tag, filename)
         else:
             stream = await github_client.stream_asset_by_id(int(asset_id_or_tag))
     except ValueError as exc:
@@ -72,5 +76,6 @@ async def get_chart(asset_id_or_tag: str, filename: str) -> Response:
     except GitHubClientUpstreamError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+    download_filename = filename.rsplit("/", maxsplit=1)[-1]
+    headers = {"Content-Disposition": f'attachment; filename="{download_filename}"'}
     return StreamingResponse(stream, media_type="application/gzip", headers=headers)

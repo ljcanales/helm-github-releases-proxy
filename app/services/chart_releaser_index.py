@@ -5,6 +5,8 @@ import yaml
 
 from app.config import Settings
 
+BRANCH_PACKAGE_MARKER = "package-in-branch"
+
 
 class ChartReleaserIndexError(Exception):
     pass
@@ -48,8 +50,35 @@ class ChartReleaserIndexRewriter:
         chart_entry["urls"] = rewritten_urls
 
     def _rewrite_url(self, url: str) -> str:
+        relative_package_path = self._parse_relative_package_path(url)
+        if relative_package_path is not None:
+            return f"charts/{BRANCH_PACKAGE_MARKER}/{relative_package_path}"
+
         tag, filename = self._parse_release_download_url(url)
         return f"charts/{quote(tag, safe='')}/{quote(filename, safe='')}"
+
+    def _parse_relative_package_path(self, url: str) -> str | None:
+        parsed = urlparse(url)
+        if parsed.scheme or parsed.netloc:
+            return None
+        if parsed.query or parsed.fragment:
+            raise ChartReleaserIndexError(
+                f"unsupported chart URL '{url}'; relative package URLs may not include query strings or fragments"
+            )
+        if not parsed.path.endswith(".tgz"):
+            return None
+        if parsed.path.startswith("/"):
+            raise ChartReleaserIndexError(
+                f"unsupported chart URL '{url}'; relative package URLs may not be absolute paths"
+            )
+
+        path_parts = [unquote(part) for part in parsed.path.split("/")]
+        if any(not part or part in (".", "..") for part in path_parts):
+            raise ChartReleaserIndexError(
+                f"unsupported chart URL '{url}'; relative package URLs must stay within the Pages branch"
+            )
+
+        return "/".join(quote(part, safe="") for part in path_parts)
 
     def _parse_release_download_url(self, url: str) -> tuple[str, str]:
         parsed = urlparse(url)

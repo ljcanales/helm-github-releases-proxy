@@ -78,8 +78,40 @@ to:
 charts/{tag}/{filename}
 ```
 
-Relative package URLs, such as chart-releaser's `--packages-with-index` output,
-are not supported.
+It also rewrites safe relative package URLs, such as chart-releaser's
+`--packages-with-index` output from:
+
+```text
+{relative_package_path}
+```
+
+to:
+
+```text
+charts/package-in-branch/{relative_package_path}
+```
+
+Relative package paths may point to chart archives in the branch root or nested
+directories, such as `demo-chart-1.2.3.tgz` or
+`packages/demo-chart-1.2.3.tgz`. Absolute paths, `.` or `..` path segments,
+query strings, fragments, and non-`.tgz` paths are rejected.
+
+Private repository support in this mode depends on the URL shape in the
+upstream `index.yaml`:
+
+- Relative package URLs, such as chart-releaser's `--packages-with-index`
+  output, are read from the configured Pages branch through the GitHub contents
+  API. These can work for private repositories when `GITHUB_TOKEN` has read
+  access to the repository.
+- GitHub release download URLs are streamed from
+  `https://github.com/{owner}/{repo}/releases/download/{tag}/{filename}`. These
+  are not fetched through the GitHub release asset API, so private repository
+  chart downloads are not supported for this URL shape even when
+  `GITHUB_TOKEN` is configured.
+
+If your private repository's chart-releaser index points to GitHub release
+download URLs, use `releases-proxy` mode instead, or configure chart-releaser to
+publish packages with the index so the index uses relative package URLs.
 
 ## Configuration
 
@@ -211,6 +243,14 @@ The app streams from:
 ```text
 https://github.com/{owner}/{repo}/releases/download/{tag}/{filename}
 ```
+
+If `{asset_id_or_tag}` is `package-in-branch`, it is treated as a reserved
+marker and `{filename}` may be a nested safe relative path. The app streams the
+package from `CHART_RELEASER_PAGES_BRANCH` instead of a GitHub release.
+
+Private repository downloads are not supported when the rewritten URL points to
+a GitHub release download URL. For private repositories, use relative package
+URLs so the proxy streams packages from the configured Pages branch.
 
 GitHub configuration errors return `500`. GitHub authentication and upstream
 failures return `502`. Missing repositories or chart assets return `404`.

@@ -46,10 +46,7 @@ class GitHubReleasesClient:
         if not branch.strip():
             raise GitHubClientConfigError("CHART_RELEASER_PAGES_BRANCH is required")
 
-        url = (
-            f"{GITHUB_API_BASE_URL}/repos/"
-            f"{self._settings.github_owner}/{self._settings.github_repo}/contents/index.yaml"
-        )
+        url = self._build_repository_contents_url("index.yaml")
         headers = self._build_headers("application/vnd.github.raw+json")
 
         try:
@@ -122,6 +119,48 @@ class GitHubReleasesClient:
 
         return iterator()
 
+    async def stream_branch_package(
+        self, package_path: str, chunk_size: int = 65536
+    ) -> AsyncIterator[bytes]:
+        self._validate_settings()
+        branch = self._settings.chart_releaser_pages_branch
+        if not branch.strip():
+            raise GitHubClientConfigError("CHART_RELEASER_PAGES_BRANCH is required")
+
+        self._validate_branch_package_path(package_path)
+        url = self._build_repository_contents_url(package_path)
+        headers = self._build_headers("application/vnd.github.raw+json")
+
+        if self._http_client is not None:
+            try:
+                response = await self._http_client.get(url, headers=headers, params={"ref": branch})
+            except httpx.RequestError as exc:
+                raise GitHubClientUpstreamError(
+                    "GitHub branch package request could not be completed"
+                ) from exc
+            self._raise_for_status(response)
+
+            async def injected_iterator() -> AsyncIterator[bytes]:
+                yield response.content
+
+            return injected_iterator()
+
+        async def iterator() -> AsyncIterator[bytes]:
+            try:
+                async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+                    async with client.stream(
+                        "GET", url, headers=headers, params={"ref": branch}
+                    ) as response:
+                        self._raise_for_status(response)
+                        async for chunk in response.aiter_bytes(chunk_size):
+                            yield chunk
+            except httpx.RequestError as exc:
+                raise GitHubClientUpstreamError(
+                    "GitHub branch package request could not be completed"
+                ) from exc
+
+        return iterator()
+
     def _build_asset_api_url(self, asset_id: int) -> str:
         return (
             f"{GITHUB_API_BASE_URL}/repos/"
@@ -134,6 +173,21 @@ class GitHubReleasesClient:
             f"{self._settings.github_owner}/{self._settings.github_repo}/releases/download/"
             f"{quote(tag, safe='')}/{quote(filename, safe='')}"
         )
+
+    def _build_repository_contents_url(self, path: str) -> str:
+        return (
+            f"{GITHUB_API_BASE_URL}/repos/"
+            f"{self._settings.github_owner}/{self._settings.github_repo}/contents/{path}"
+        )
+
+    def _validate_branch_package_path(self, package_path: str) -> None:
+        path_parts = package_path.split("/")
+        if (
+            not package_path.endswith(".tgz")
+            or package_path.startswith("/")
+            or any(not part or part in (".", "..") for part in path_parts)
+        ):
+            raise GitHubClientConfigError("branch package path must be a safe relative .tgz path")
 
     def _validate_settings(self) -> None:
         if not self._settings.github_owner:
