@@ -8,6 +8,8 @@ from app.config import Settings
 from app.models.github import GitHubRelease, GitHubReleaseAsset
 
 GITHUB_API_BASE_URL = "https://api.github.com"
+GITHUB_API_TIMEOUT = httpx.Timeout(connect=5.0, read=5.0, write=10.0, pool=5.0)
+GITHUB_DOWNLOAD_TIMEOUT = httpx.Timeout(connect=5.0, read=30.0, write=10.0, pool=5.0)
 
 
 class GitHubClientError(Exception):
@@ -53,7 +55,7 @@ class GitHubReleasesClient:
             if self._http_client is not None:
                 response = await self._http_client.get(url, headers=headers, params={"ref": branch})
             else:
-                async with httpx.AsyncClient(timeout=20.0) as client:
+                async with httpx.AsyncClient(timeout=GITHUB_API_TIMEOUT) as client:
                     response = await client.get(url, headers=headers, params={"ref": branch})
         except httpx.RequestError as exc:
             raise GitHubClientUpstreamError("GitHub index request could not be completed") from exc
@@ -69,7 +71,9 @@ class GitHubReleasesClient:
             if self._http_client is not None:
                 response = await self._http_client.get(asset_api_url, headers=headers)
             else:
-                async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+                async with httpx.AsyncClient(
+                    timeout=GITHUB_DOWNLOAD_TIMEOUT, follow_redirects=True
+                ) as client:
                     response = await client.get(asset_api_url, headers=headers)
         except httpx.RequestError as exc:
             raise GitHubClientUpstreamError("GitHub asset request could not be completed") from exc
@@ -83,7 +87,9 @@ class GitHubReleasesClient:
 
         async def iterator() -> AsyncIterator[bytes]:
             try:
-                async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+                async with httpx.AsyncClient(
+                    timeout=GITHUB_DOWNLOAD_TIMEOUT, follow_redirects=True
+                ) as client:
                     async with client.stream("GET", asset_api_url, headers=headers) as response:
                         self._raise_for_status(response)
                         async for chunk in response.aiter_bytes(chunk_size):
@@ -107,7 +113,9 @@ class GitHubReleasesClient:
 
         async def iterator() -> AsyncIterator[bytes]:
             try:
-                async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+                async with httpx.AsyncClient(
+                    timeout=GITHUB_DOWNLOAD_TIMEOUT, follow_redirects=True
+                ) as client:
                     async with client.stream("GET", url, headers=headers) as response:
                         self._raise_for_status(response)
                         async for chunk in response.aiter_bytes(chunk_size):
@@ -147,7 +155,9 @@ class GitHubReleasesClient:
 
         async def iterator() -> AsyncIterator[bytes]:
             try:
-                async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+                async with httpx.AsyncClient(
+                    timeout=GITHUB_DOWNLOAD_TIMEOUT, follow_redirects=True
+                ) as client:
                     async with client.stream(
                         "GET", url, headers=headers, params={"ref": branch}
                     ) as response:
@@ -206,7 +216,7 @@ class GitHubReleasesClient:
             if self._http_client is not None:
                 response = await self._http_client.get(url, headers=headers)
             else:
-                async with httpx.AsyncClient(timeout=20.0) as client:
+                async with httpx.AsyncClient(timeout=GITHUB_API_TIMEOUT) as client:
                     response = await client.get(url, headers=headers)
         except httpx.RequestError as exc:
             raise GitHubClientUpstreamError("GitHub releases request could not be completed") from exc
