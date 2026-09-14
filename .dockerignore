@@ -1,5 +1,8 @@
-# Ignore everything
+# Keep the production build context limited to the Go service.
 *
-# Re-include only what is needed
-!app/
-!requirements.txt
+!go.mod
+!go.sum
+!cmd/
+!cmd/**
+!internal/
+!internal/**

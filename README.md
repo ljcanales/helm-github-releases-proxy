@@ -1,224 +1,23 @@
 # helm-github-releases-proxy
 
-Helm chart repository proxy backed by GitHub Releases.
+Read-only Helm repository proxy for charts published as GitHub release assets,
+through chart-releaser, or from a local directory. Either GitHub mode can also
+include one local chart directory. The service builds one aggregate index and
+streams chart packages through the proxy.
 
-This service lets a GitHub repository behave like a classic Helm chart
-repository. Helm clients can use `helm repo add`, `helm repo update`, and
-`helm pull`, while chart packages stay stored as GitHub release assets.
+## Quick start
 
-The proxy solves two common gaps:
-
-- GitHub Releases are convenient for storing chart archives, but they do not
-  expose a Helm-compatible repository API by themselves.
-- Private repositories and release assets often need a Helm-compatible proxy
-  instead of direct GitHub download URLs.
-
-The app exposes `/index.yaml` and `/charts/...` routes, reads from one GitHub
-repository, and streams chart downloads through the proxy.
-
-## Modes
-
-Choose one mode based on how your chart repository is published.
-
-### `releases-proxy`
-
-Use this mode when chart `.tgz` files are uploaded directly as GitHub release
-assets and you want this app to generate `index.yaml`.
-
-Required configuration:
+Docker is required to run the proxy; Helm is required for the client commands
+below.
 
 ```sh
-MODE=releases-proxy
-GITHUB_OWNER=<my-username>
-GITHUB_REPO=<my-charts>
-```
-
-In this mode, `GET /index.yaml` lists GitHub releases, filters release assets
-ending in `.tgz`, derives chart name and version from asset names, and generates
-Helm repository YAML. Chart URLs are generated as:
-
-```text
-charts/{asset_id}/{filename}
-```
-
-Helm resolves these chart URLs relative to `index.yaml`.
-
-Chart asset filenames must follow:
-
-```text
-<chart-name>-<version>.tgz
-```
-
-### `chart-releaser-action-support`
-
-Use this mode when `helm/chart-releaser-action` already publishes an
-`index.yaml` file to a GitHub Pages branch and you want this app to rewrite its
-chart URLs through the proxy.
-
-Required configuration:
-
-```sh
-MODE=chart-releaser-action-support
-GITHUB_OWNER=<my-username>
-GITHUB_REPO=<my-charts>
-CHART_RELEASER_PAGES_BRANCH=gh-pages # if not provided, defaults to gh-pages
-```
-
-In this mode, `GET /index.yaml` fetches the root `index.yaml` from
-`CHART_RELEASER_PAGES_BRANCH`, preserves chart metadata, and rewrites GitHub
-release download URLs from:
-
-```text
-https://github.com/{owner}/{repo}/releases/download/{tag}/{filename}
-```
-
-to:
-
-```text
-charts/{tag}/{filename}
-```
-
-It also rewrites safe relative package URLs, such as chart-releaser's
-`--packages-with-index` output from:
-
-```text
-{relative_package_path}
-```
-
-to:
-
-```text
-charts/package-in-branch/{relative_package_path}
-```
-
-Relative package paths may point to chart archives in the branch root or nested
-directories, such as `demo-chart-1.2.3.tgz` or
-`packages/demo-chart-1.2.3.tgz`. Absolute paths, `.` or `..` path segments,
-query strings, fragments, and non-`.tgz` paths are rejected.
-
-Private repository support in this mode depends on the URL shape in the
-upstream `index.yaml`:
-
-- Relative package URLs, such as chart-releaser's `--packages-with-index`
-  output, are read from the configured Pages branch through the GitHub contents
-  API. These can work for private repositories when `GITHUB_TOKEN` has read
-  access to the repository.
-- GitHub release download URLs are streamed from
-  `https://github.com/{owner}/{repo}/releases/download/{tag}/{filename}`. These
-  are not fetched through the GitHub release asset API, so private repository
-  chart downloads are not supported for this URL shape even when
-  `GITHUB_TOKEN` is configured.
-
-If your private repository's chart-releaser index points to GitHub release
-download URLs, use `releases-proxy` mode instead, or configure chart-releaser to
-publish packages with the index so the index uses relative package URLs.
-
-## Configuration
-
-- `MODE`: `releases-proxy` or `chart-releaser-action-support`; defaults to
-  `releases-proxy`
-- `APP_PORT`: port used by Uvicorn; defaults to `8080`
-- `GITHUB_OWNER`: GitHub repository owner or organization
-- `GITHUB_REPO`: GitHub repository name
-- `GITHUB_TOKEN`: optional for public repositories; required for private
-  repositories
-- `CHART_RELEASER_PAGES_BRANCH`: branch containing chart-releaser `index.yaml`;
-  defaults to `gh-pages` (only apply when running in `chart-releaser-action-support` mode)
-- `CACHE_TTL_SECONDS`: TTL for generated `index.yaml` responses; defaults to
-  `60`
-- `LOG_LEVEL`: Python logging level; defaults to `INFO`
-
-For public repositories, `GITHUB_TOKEN` can be left empty. A token is still
-recommended for higher GitHub API rate limits. For private repositories, use a
-fine-grained GitHub token with read-only repository permissions. This proxy only
-reads releases, assets, and repository contents; it does not publish packages or
-write to GitHub.
-
-## Run From Source
-
-Clone the repository, create and activate a virtual environment, then install dependencies:
-
-```sh
-pip install -r requirements.txt
-```
-
-Copy and edit the local environment file:
-
-```sh
-cp .env.example .env
-```
-
-Start the server:
-
-```sh
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8080
-```
-
-Verify it is running:
-
-```sh
-curl http://localhost:8080/health
-```
-
-## Run With Docker
-
-Pull and run the published image:
-
-```sh
-docker pull ljcanales/helm-github-releases-proxy
 docker run --rm -p 8080:8080 \
-  -e MODE=releases-proxy \
-  -e APP_PORT=8080 \
-  -e GITHUB_OWNER=username \
-  -e GITHUB_REPO=my_charts_repo \
-  -e GITHUB_TOKEN=github_readonly_token \
-  ljcanales/helm-github-releases-proxy
-```
-
-To build the image locally instead:
-
-```sh
-docker build -t helm-github-releases-proxy .
-docker run --rm -p 8080:8080 \
-  -e MODE=releases-proxy \
-  -e APP_PORT=8080 \
   -e GITHUB_OWNER=acme \
   -e GITHUB_REPO=charts \
-  helm-github-releases-proxy
+  ljcanales/helm-github-releases-proxy:latest
 ```
 
-## Docker Compose
-
-Example Compose service using the published image:
-
-```yaml
-services:
-  helm-github-releases-proxy:
-    image: ljcanales/helm-github-releases-proxy
-    ports:
-      - "8080:8080"
-    environment:
-      MODE: releases-proxy
-      APP_PORT: "8080"
-      GITHUB_OWNER: my-username
-      GITHUB_REPO: my-charts-repository
-      GITHUB_TOKEN: github_pat_readonly_token
-      CACHE_TTL_SECONDS: "60"
-      LOG_LEVEL: INFO
-```
-
-For `chart-releaser-action-support`, change the mode and include the Pages
-branch:
-
-```yaml
-environment:
-  MODE: chart-releaser-action-support
-  CHART_RELEASER_PAGES_BRANCH: gh-pages
-```
-
-## Helm Usage
-
-With the app running and reachable by Helm:
+Then add the repository to Helm:
 
 ```sh
 helm repo add helm-github-releases-proxy http://localhost:8080
@@ -226,38 +25,184 @@ helm repo update
 helm search repo helm-github-releases-proxy
 ```
 
-## Endpoints
+In `github-releases` mode, release assets must match
+`<chart-name>-<version>.tgz`; an optional `v` before the semantic version is
+accepted. Other assets are skipped.
 
-- `GET /health` returns `200`
-- `GET /index.yaml` returns Helm repository YAML
-- `GET /charts/{asset_id_or_tag}/{filename}` streams the matching chart archive
+### Add local charts to a GitHub mode
 
-Chart download behavior depends on `MODE`.
+Mount your chart directory read-only and set `LOCAL_PATH` to its absolute
+container path to add local packages to either GitHub mode. Leave it unset or
+empty to use GitHub alone. The example uses `github-releases`; set
+`MODE=chart-releaser` to use a chart-releaser index.
 
-In `releases-proxy` mode, `{asset_id_or_tag}` is a GitHub release asset id. The
-app streams from the GitHub release asset API.
-
-In `chart-releaser-action-support` mode, `{asset_id_or_tag}` is a release tag.
-The app streams from:
-
-```text
-https://github.com/{owner}/{repo}/releases/download/{tag}/{filename}
+```sh
+docker run --rm -p 8080:8080 \
+  -e MODE=github-releases \
+  -e GITHUB_OWNER=acme \
+  -e GITHUB_REPO=charts \
+  -e LOCAL_PATH=/charts \
+  --mount type=bind,src=/srv/helm-charts,dst=/charts,readonly \
+  ljcanales/helm-github-releases-proxy:latest
 ```
 
-If `{asset_id_or_tag}` is `package-in-branch`, it is treated as a reserved
-marker and `{filename}` may be a nested safe relative path. The app streams the
-package from `CHART_RELEASER_PAGES_BRANCH` instead of a GitHub release.
+If GitHub and local sources contain the same chart name and version, the
+service retains GitHub metadata and lists GitHub download URLs first, followed
+by the local download URL.
 
-Private repository downloads are not supported when the rewritten URL points to
-a GitHub release download URL. For private repositories, use relative package
-URLs so the proxy streams packages from the configured Pages branch.
+### Local-only charts
 
-GitHub configuration errors return `500`. GitHub authentication and upstream
-failures return `502`. Missing repositories or chart assets return `404`.
+To serve charts from a directory without configuring or contacting GitHub,
+mount the chart directory read-only and provide its absolute container path
+as `LOCAL_PATH`. The host directory must exist and may be empty; an unset or
+relative path is a configuration error. Chart archives must be direct children
+of that directory.
 
-## Current Limitations
+```sh
+docker run --rm -p 8080:8080 \
+  -e MODE=local-only \
+  -e LOCAL_PATH=/charts \
+  --mount type=bind,src=/srv/helm-charts,dst=/charts,readonly \
+  ljcanales/helm-github-releases-proxy:latest
+```
 
-- single GitHub repository only
-- no end-user authentication layer
-- no metrics or tracing
-- no chart upload API
+## Configuration
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `MODE` | `github-releases` | `github-releases`, `chart-releaser`, or `local-only`. Other values are configuration errors. |
+| `LOCAL_PATH` | Empty | Optional absolute local chart directory in either GitHub mode; required in `local-only`. The directory may be empty. |
+| `GITHUB_OWNER` | Required for GitHub modes | GitHub repository owner. Ignored in `local-only` mode. |
+| `GITHUB_REPO` | Required for GitHub modes | GitHub repository name. Ignored in `local-only` mode. |
+| `GITHUB_TOKEN` | Empty | Optional token value for GitHub API requests. Ignored in `local-only` mode. |
+| `CHART_RELEASER_PAGES_BRANCH` | `gh-pages` | Branch containing the chart-releaser `index.yaml` and any relative packages. Ignored outside `chart-releaser` mode. |
+| `PORT` | `8080` | HTTP port, from `1` through `65535`. |
+| `CACHE_TTL_SECONDS` | `60` | Fresh-index cache lifetime. `0` rebuilds on every index request. |
+| `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARN` (`WARNING` also accepted), or `ERROR`. |
+
+For private repositories, supply a token with read access. In chart-releaser
+mode, when configured, `GITHUB_TOKEN` authenticates branch index and relative
+package reads. Direct requests to `github.com/.../releases/download/...` also
+send the configured token but can still fail for private repositories because
+of GitHub's private release-download authentication limitations. For private
+chart-releaser repositories, keep packages on the configured branch and use
+relative URLs in `index.yaml`. The former `HELM_REPOSITORIES` JSON configuration
+is no longer supported.
+
+A flat environment example is also available in `.env.example`. Edit its
+values for your repository, then pass it to Docker:
+
+```sh
+docker run --rm -p 8080:8080 \
+  --env-file .env.example \
+  ljcanales/helm-github-releases-proxy:latest
+```
+
+To serve a chart-releaser index from its default `gh-pages` branch:
+
+```sh
+docker run --rm -p 8080:8080 \
+  -e MODE=chart-releaser \
+  -e GITHUB_OWNER=acme \
+  -e GITHUB_REPO=charts \
+  ljcanales/helm-github-releases-proxy:latest
+```
+
+Add `-e CHART_RELEASER_PAGES_BRANCH=release-pages` to use another branch.
+When switching between the two GitHub modes, run `helm repo update` so clients
+replace package URLs that use the old mode prefix.
+
+## HTTP API
+
+All routes use `GET`.
+
+| Route | Purpose |
+| --- | --- |
+| `/healthz` | Liveness: `200` with `{"status":"ok"}` while serving. |
+| `/readyz` | Configuration readiness: `200` when valid, otherwise `503` with `{"status":"not_ready"}`. |
+| `/status` | Aggregate index and source status, cache timestamps, counts, and last error. |
+| `/index.yaml` | Aggregate Helm index. |
+| `/charts/github-releases/{asset}/{filename}` | Stream an indexed release asset by ID and filename. |
+| `/charts/chart-releaser/{tag}/{filename}` | Stream a package from a chart-releaser release URL. |
+| `/charts/chart-releaser/package-in-branch/{path}` | Stream a package stored with the branch index; nested safe paths are supported. |
+| `/charts/local/{filename}` | Stream a package from the enabled local chart directory. |
+
+Packages use `application/gzip` and an attachment filename. Missing assets,
+invalid filenames, and inactive source routes return `404`; upstream download
+failures return `502`.
+
+## Operational behavior
+
+Invalid configuration is logged at startup and reported by `/readyz`.
+Startup index warming is asynchronous; readiness depends on configuration,
+not GitHub availability.
+
+The aggregate index status starts as `unknown`, becomes `ok` after a successful
+build, and becomes `partial` if the source fails before any successful build.
+After a successful build, a failed refresh keeps serving the last successful
+index and reports `stale`. Failed sources include an error and indexed/skipped
+counts in `/status`. Zero TTL disables the fresh-index cache but retains this
+failure fallback.
+
+## Docker Compose
+
+The image runs as a non-root user and listens on port `8080` by default.
+Save this example as `compose.yaml`, or merge the `helm-proxy` service into an
+existing Compose file:
+
+```yaml
+services:
+  helm-proxy:
+    image: ljcanales/helm-github-releases-proxy:latest
+    ports:
+      - "8080:8080"
+    environment:
+      MODE: ${MODE:-github-releases}
+      GITHUB_OWNER: ${GITHUB_OWNER:?Set GITHUB_OWNER}
+      GITHUB_REPO: ${GITHUB_REPO:?Set GITHUB_REPO}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      CHART_RELEASER_PAGES_BRANCH: ${CHART_RELEASER_PAGES_BRANCH:-gh-pages}
+      LOCAL_PATH: ${LOCAL_PATH:-}
+      PORT: "8080"
+      CACHE_TTL_SECONDS: "60"
+      LOG_LEVEL: INFO
+```
+
+After saving the Compose file, run this from the directory containing it:
+
+```sh
+GITHUB_OWNER=acme GITHUB_REPO=charts docker compose up
+```
+
+To aggregate local charts in either GitHub mode, set `LOCAL_PATH` to the
+container path `/charts` and mount the host directory `./charts` read-only.
+Merge these settings under the existing `services.helm-proxy` service, keeping
+its other environment settings:
+
+```yaml
+services:
+  helm-proxy:
+    environment:
+      LOCAL_PATH: /charts
+    volumes:
+      - ./charts:/charts:ro
+```
+
+For local-only charts, mount the chart directory read-only and supply its
+container path. An empty mounted directory is valid.
+
+```yaml
+services:
+  helm-proxy:
+    image: ljcanales/helm-github-releases-proxy:latest
+    ports:
+      - "8080:8080"
+    environment:
+      MODE: local-only
+      LOCAL_PATH: /charts
+      PORT: "8080"
+      CACHE_TTL_SECONDS: "60"
+      LOG_LEVEL: INFO
+    volumes:
+      - ./charts:/charts:ro
+```
