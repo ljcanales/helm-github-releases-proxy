@@ -1,13 +1,23 @@
-FROM python:3.14-alpine
+FROM golang:1.22-alpine AS build
 
-WORKDIR /app
+WORKDIR /src
 
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
+COPY go.mod go.sum ./
+RUN go mod download
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade -r requirements.txt
+COPY cmd ./cmd
+COPY internal ./internal
 
-COPY app ./app
+RUN CGO_ENABLED=0 GOOS=linux go build \
+    -trimpath \
+    -ldflags="-s -w" \
+    -o /out/helm-github-releases-proxy \
+    ./cmd/server
 
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${APP_PORT:-8080}"]
+FROM gcr.io/distroless/static-debian12:nonroot
+
+COPY --from=build /out/helm-github-releases-proxy /helm-github-releases-proxy
+
+EXPOSE 8080
+USER nonroot:nonroot
+ENTRYPOINT ["/helm-github-releases-proxy"]
