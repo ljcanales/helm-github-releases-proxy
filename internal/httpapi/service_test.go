@@ -1,4 +1,4 @@
-package httpapi
+package httpapi_test
 
 import (
 	"archive/tar"
@@ -21,6 +21,7 @@ import (
 
 	"helm-github-releases-proxy/internal/config"
 	githubclient "helm-github-releases-proxy/internal/github"
+	"helm-github-releases-proxy/internal/startup"
 )
 
 type fakeGitHubBackend struct {
@@ -57,18 +58,17 @@ func (f *fakeGitHubBackend) FetchBranchFile(_ context.Context, _, _, _, path, _ 
 func TestHTTPServiceStatusReportsRepositoriesCacheAndSanitizedFailures(t *testing.T) {
 	localPath := filepath.Join(t.TempDir(), "private-charts")
 	fake := &fakeGitHubBackend{releasesErr: errors.New("upstream failed at /container/secrets/token")}
-	service := New(config.Config{Repositories: []config.Repository{
+	service := startup.New(config.Config{Repositories: []config.Repository{
 		{Name: "github", Type: config.GitHubReleasesType, Owner: "acme", Repo: "charts"},
 		{Name: "local", Type: config.LocalDirectoryType, Path: localPath},
-	}}, nil, slog.Default())
-	service.github = fake
+	}}, nil, slog.Default(), fake, time.Now, context.Background())
 
 	response := httptest.NewRecorder()
-	service.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/index.yaml", nil))
+	service.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/index.yaml", nil))
 	assertStatusCode(t, response.Code, http.StatusOK)
 
 	statusResponse := httptest.NewRecorder()
-	service.Handler().ServeHTTP(statusResponse, httptest.NewRequest(http.MethodGet, "/status", nil))
+	service.Handler.ServeHTTP(statusResponse, httptest.NewRequest(http.MethodGet, "/status", nil))
 	assertStatusCode(t, statusResponse.Code, http.StatusOK)
 	var got struct {
 		Status       string `json:"status"`
@@ -98,10 +98,7 @@ func TestHTTPServiceStatusReportsRepositoriesCacheAndSanitizedFailures(t *testin
 }
 
 func TestHTTPServiceDiscardsPartiallyParsedChartReleaserFailures(t *testing.T) {
-	service := New(config.Config{Repositories: []config.Repository{{
-		Name: "pages", Type: config.ChartReleaserType, Owner: "acme", Repo: "charts", Branch: "gh-pages",
-	}}}, nil, slog.Default())
-	service.github = &fakeGitHubBackend{branch: `apiVersion: v1
+	serviceBackend := &fakeGitHubBackend{branch: `apiVersion: v1
 entries:
   good:
     - name: good
@@ -111,8 +108,11 @@ entries:
     - name: bad
       urls: []
 `}
+	service := startup.New(config.Config{Repositories: []config.Repository{{
+		Name: "pages", Type: config.ChartReleaserType, Owner: "acme", Repo: "charts", Branch: "gh-pages",
+	}}}, nil, slog.Default(), serviceBackend, time.Now, context.Background())
 	response := httptest.NewRecorder()
-	service.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/index.yaml", nil))
+	service.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/index.yaml", nil))
 	assertStatusCode(t, response.Code, http.StatusOK)
 	if strings.Contains(response.Body.String(), "good:") || strings.Contains(response.Body.String(), "bad:") {
 		t.Fatalf("failed backend contributed entries: %q", response.Body.String())
@@ -160,12 +160,11 @@ entries:
         - https://github.com/acme/charts/releases/download/v1.2.3/demo-1.2.3.tgz
         - packages/demo-1.2.3.tgz
 `}
-	service := New(config.Config{Repositories: []config.Repository{{
+	service := startup.New(config.Config{Repositories: []config.Repository{{
 		Name: "pages", Type: config.ChartReleaserType, Owner: "acme", Repo: "charts", Branch: "gh-pages",
-	}}}, nil, slog.Default())
-	service.github = fake
+	}}}, nil, slog.Default(), fake, time.Now, context.Background())
 	index := httptest.NewRecorder()
-	service.Handler().ServeHTTP(index, httptest.NewRequest(http.MethodGet, "/index.yaml", nil))
+	service.Handler.ServeHTTP(index, httptest.NewRequest(http.MethodGet, "/index.yaml", nil))
 	assertStatusCode(t, index.Code, http.StatusOK)
 	body := index.Body.String()
 	if !strings.Contains(body, "description: kept") || !strings.Contains(body, "appVersion: \"4.5\"") || strings.Contains(body, "unknown:") {
@@ -175,7 +174,7 @@ entries:
 		t.Fatalf("rewritten URLs missing: %q", body)
 	}
 	response := httptest.NewRecorder()
-	service.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/charts/pages/package-in-branch/packages/demo-1.2.3.tgz", nil))
+	service.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/charts/pages/package-in-branch/packages/demo-1.2.3.tgz", nil))
 	assertStatusCode(t, response.Code, http.StatusOK)
 	if response.Body.String() != "branch chart" || response.Header().Get("Content-Disposition") != `attachment; filename="demo-1.2.3.tgz"` {
 		t.Fatalf("response = (%d, %q, %#v)", response.Code, response.Body.String(), response.Header())
@@ -183,9 +182,9 @@ entries:
 }
 
 func TestHTTPServiceShell(t *testing.T) {
-	service := New(config.Config{Port: 8080}, nil, slog.Default())
-	service.now = func() time.Time { return time.Date(2026, 8, 30, 12, 34, 56, 0, time.FixedZone("UTC", 0)) }
-	server := httptest.NewServer(service.Handler())
+	serviceClock := func() time.Time { return time.Date(2026, 8, 30, 12, 34, 56, 0, time.FixedZone("UTC", 0)) }
+	service := startup.New(config.Config{Port: 8080}, nil, slog.Default(), githubclient.NewClient(nil), serviceClock, context.Background())
+	server := httptest.NewServer(service.Handler)
 	t.Cleanup(server.Close)
 
 	t.Run("health", func(t *testing.T) {
@@ -225,10 +224,10 @@ func TestHTTPServiceShell(t *testing.T) {
 }
 
 func TestHTTPServiceReadinessReflectsConfigurationValidity(t *testing.T) {
-	service := New(config.Config{}, errors.New("invalid configuration"), slog.Default())
+	service := startup.New(config.Config{}, errors.New("invalid configuration"), slog.Default(), githubclient.NewClient(nil), time.Now, context.Background())
 	request := httptest.NewRequest(http.MethodGet, "/readyz", nil)
 	response := httptest.NewRecorder()
-	service.Handler().ServeHTTP(response, request)
+	service.Handler.ServeHTTP(response, request)
 
 	assertStatusCode(t, response.Code, http.StatusServiceUnavailable)
 	if got := response.Body.String(); got != `{"status":"not_ready"}` {
@@ -244,8 +243,8 @@ func TestHTTPServiceServesLocalChartsAndIndexesThem(t *testing.T) {
 	if err := os.Chtimes(path, time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC), time.Time{}); err != nil {
 		t.Fatal(err)
 	}
-	service := New(config.Config{Repositories: []config.Repository{{Name: "local", Type: config.LocalDirectoryType, Path: directory}}}, nil, slog.Default())
-	handler := service.Handler()
+	service := startup.New(config.Config{Repositories: []config.Repository{{Name: "local", Type: config.LocalDirectoryType, Path: directory}}}, nil, slog.Default(), githubclient.NewClient(nil), time.Now, context.Background())
+	handler := service.Handler
 
 	index := httptest.NewRecorder()
 	handler.ServeHTTP(index, httptest.NewRequest(http.MethodGet, "/index.yaml", nil))
@@ -275,13 +274,12 @@ func TestHTTPServiceIndexesAndStreamsGitHubReleaseAssets(t *testing.T) {
 		}}},
 		asset: io.NopCloser(strings.NewReader("github chart")),
 	}
-	service := New(config.Config{Repositories: []config.Repository{{
+	service := startup.New(config.Config{Repositories: []config.Repository{{
 		Name: "upstream", Type: config.GitHubReleasesType, Owner: "acme", Repo: "charts",
-	}}}, nil, slog.Default())
-	service.github = fake
+	}}}, nil, slog.Default(), fake, time.Now, context.Background())
 
 	index := httptest.NewRecorder()
-	service.Handler().ServeHTTP(index, httptest.NewRequest(http.MethodGet, "/index.yaml", nil))
+	service.Handler.ServeHTTP(index, httptest.NewRequest(http.MethodGet, "/index.yaml", nil))
 	assertStatusCode(t, index.Code, http.StatusOK)
 	body := index.Body.String()
 	if !strings.Contains(body, "charts/upstream/42/demo-v1.2.3.tgz") || !strings.Contains(body, "version: 1.2.3") || !strings.Contains(body, "digest: abc") {
@@ -292,7 +290,7 @@ func TestHTTPServiceIndexesAndStreamsGitHubReleaseAssets(t *testing.T) {
 	}
 
 	response := httptest.NewRecorder()
-	service.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/charts/upstream/42/demo-v1.2.3.tgz", nil))
+	service.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/charts/upstream/42/demo-v1.2.3.tgz", nil))
 	assertStatusCode(t, response.Code, http.StatusOK)
 	if response.Body.String() != "github chart" || response.Header().Get("Content-Type") != "application/gzip" || response.Header().Get("Content-Disposition") != `attachment; filename="demo-v1.2.3.tgz"` {
 		t.Fatalf("response = (%d, %q, %#v)", response.Code, response.Body.String(), response.Header())
@@ -308,13 +306,13 @@ func TestHTTPServiceAggregatesLocalRepositoriesDeterministically(t *testing.T) {
 	writeTestChart(t, filepath.Join(second, "demo-1.0.0.tgz"), "demo", "1.0.0", "second-demo")
 	writeTestChart(t, filepath.Join(second, "alpha-1.0.0.tgz"), "alpha", "1.0.0", "alpha")
 
-	service := New(config.Config{Repositories: []config.Repository{
+	serviceClock := func() time.Time { return time.Date(2026, 8, 30, 12, 34, 56, 0, time.UTC) }
+	service := startup.New(config.Config{Repositories: []config.Repository{
 		{Name: "first", Type: config.LocalDirectoryType, Path: first},
 		{Name: "second", Type: config.LocalDirectoryType, Path: second},
-	}}, nil, slog.Default())
-	service.now = func() time.Time { return time.Date(2026, 8, 30, 12, 34, 56, 0, time.UTC) }
+	}}, nil, slog.Default(), githubclient.NewClient(nil), serviceClock, context.Background())
 	response := httptest.NewRecorder()
-	service.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/index.yaml", nil))
+	service.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/index.yaml", nil))
 	assertStatusCode(t, response.Code, http.StatusOK)
 
 	body := response.Body.String()
@@ -339,9 +337,9 @@ func TestHTTPServiceAggregatesLocalRepositoriesDeterministically(t *testing.T) {
 func TestHTTPServiceServesLastSuccessfulIndexWhenAllLocalRepositoriesFail(t *testing.T) {
 	directory := t.TempDir()
 	writeTestChart(t, filepath.Join(directory, "demo-1.0.0.tgz"), "demo", "1.0.0", "chart")
-	service := New(config.Config{Repositories: []config.Repository{{Name: "local", Type: config.LocalDirectoryType, Path: directory}}}, nil, slog.Default())
+	service := startup.New(config.Config{Repositories: []config.Repository{{Name: "local", Type: config.LocalDirectoryType, Path: directory}}}, nil, slog.Default(), githubclient.NewClient(nil), time.Now, context.Background())
 	first := httptest.NewRecorder()
-	service.Handler().ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/index.yaml", nil))
+	service.Handler.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/index.yaml", nil))
 	if first.Code != http.StatusOK {
 		t.Fatalf("first status = %d", first.Code)
 	}
@@ -349,7 +347,7 @@ func TestHTTPServiceServesLastSuccessfulIndexWhenAllLocalRepositoriesFail(t *tes
 		t.Fatal(err)
 	}
 	second := httptest.NewRecorder()
-	service.Handler().ServeHTTP(second, httptest.NewRequest(http.MethodGet, "/index.yaml", nil))
+	service.Handler.ServeHTTP(second, httptest.NewRequest(http.MethodGet, "/index.yaml", nil))
 	if second.Code != http.StatusOK || second.Body.String() != first.Body.String() {
 		t.Fatalf("stale response = (%d, %q), want (%d, %q)", second.Code, second.Body.String(), first.Code, first.Body.String())
 	}
@@ -359,12 +357,12 @@ func TestHTTPServiceServesLastSuccessfulIndexWhenOneLocalRepositoryFails(t *test
 	working := t.TempDir()
 	missing := filepath.Join(t.TempDir(), "missing")
 	writeTestChart(t, filepath.Join(working, "demo-1.0.0.tgz"), "demo", "1.0.0", "chart")
-	service := New(config.Config{Repositories: []config.Repository{
+	service := startup.New(config.Config{Repositories: []config.Repository{
 		{Name: "working", Type: config.LocalDirectoryType, Path: working},
 		{Name: "missing", Type: config.LocalDirectoryType, Path: missing},
-	}}, nil, slog.Default())
+	}}, nil, slog.Default(), githubclient.NewClient(nil), time.Now, context.Background())
 	first := httptest.NewRecorder()
-	service.Handler().ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/index.yaml", nil))
+	service.Handler.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/index.yaml", nil))
 	if first.Code != http.StatusOK || !strings.Contains(first.Body.String(), "charts/working/demo-1.0.0.tgz") {
 		t.Fatalf("first response = (%d, %q)", first.Code, first.Body.String())
 	}
@@ -372,7 +370,7 @@ func TestHTTPServiceServesLastSuccessfulIndexWhenOneLocalRepositoryFails(t *test
 		t.Fatal(err)
 	}
 	second := httptest.NewRecorder()
-	service.Handler().ServeHTTP(second, httptest.NewRequest(http.MethodGet, "/index.yaml", nil))
+	service.Handler.ServeHTTP(second, httptest.NewRequest(http.MethodGet, "/index.yaml", nil))
 	if second.Code != http.StatusOK || second.Body.String() != first.Body.String() {
 		t.Fatalf("stale response = (%d, %q), want (%d, %q)", second.Code, second.Body.String(), first.Code, first.Body.String())
 	}
@@ -383,12 +381,12 @@ func TestHTTPServiceCachesIndexUntilTTLExpires(t *testing.T) {
 	path := filepath.Join(directory, "demo-1.0.0.tgz")
 	writeTestChart(t, path, "demo", "1.0.0", "first")
 	current := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
-	service := New(config.Config{
+	serviceClock := func() time.Time { return current }
+	service := startup.New(config.Config{
 		CacheTTLSeconds: 60,
 		Repositories:    []config.Repository{{Name: "local", Type: config.LocalDirectoryType, Path: directory}},
-	}, nil, slog.Default())
-	service.now = func() time.Time { return current }
-	handler := service.Handler()
+	}, nil, slog.Default(), githubclient.NewClient(nil), serviceClock, context.Background())
+	handler := service.Handler
 
 	first := httptest.NewRecorder()
 	handler.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/index.yaml", nil))
@@ -422,13 +420,13 @@ func TestHTTPServiceCachesIndexUntilTTLExpires(t *testing.T) {
 func TestHTTPServiceStartupWarmIsAsynchronousAndDoesNotAffectReadiness(t *testing.T) {
 	directory := t.TempDir()
 	writeTestChart(t, filepath.Join(directory, "demo-1.0.0.tgz"), "demo", "1.0.0", "chart")
-	service := New(config.Config{Repositories: []config.Repository{{Name: "local", Type: config.LocalDirectoryType, Path: directory}}}, nil, slog.Default())
+	service := startup.New(config.Config{Repositories: []config.Repository{{Name: "local", Type: config.LocalDirectoryType, Path: directory}}}, nil, slog.Default(), githubclient.NewClient(nil), time.Now, context.Background())
 	service.Start()
 
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		status := httptest.NewRecorder()
-		service.Handler().ServeHTTP(status, httptest.NewRequest(http.MethodGet, "/status", nil))
+		service.Handler.ServeHTTP(status, httptest.NewRequest(http.MethodGet, "/status", nil))
 		if strings.Contains(status.Body.String(), `"last_success_at":"`) {
 			return
 		}
@@ -474,10 +472,10 @@ func TestHTTPServiceLocalDownloadsRejectUnindexedAndTraversalPaths(t *testing.T)
 	if err := os.WriteFile(filepath.Join(directory, "demo-1.2.3.tgz"), []byte("chart"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	service := New(config.Config{Repositories: []config.Repository{{Name: "local", Type: config.LocalDirectoryType, Path: directory}}}, nil, slog.Default())
+	service := startup.New(config.Config{Repositories: []config.Repository{{Name: "local", Type: config.LocalDirectoryType, Path: directory}}}, nil, slog.Default(), githubclient.NewClient(nil), time.Now, context.Background())
 	for _, requestPath := range []string{"/charts/local/demo-1.2.3.tgz", "/charts/local/../demo-1.2.3.tgz", "/charts/local/%2e%2e/demo-1.2.3.tgz"} {
 		response := httptest.NewRecorder()
-		service.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, requestPath, nil))
+		service.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, requestPath, nil))
 		assertStatusCode(t, response.Code, http.StatusNotFound)
 		if response.Header().Get("Content-Type") == "application/gzip" {
 			t.Fatalf("unexpected chart content type for %q", requestPath)
@@ -527,7 +525,7 @@ func TestFlatConfigurationAggregatesLocalChartsWithGitHubModes(t *testing.T) {
 	created := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
 	for _, tc := range []struct {
 		mode, githubURL, githubBody, description, inactiveRoute string
-		backend                                                 githubBackend
+		backend                                                 startup.GitHubBackend
 	}{
 		{
 			mode: "github-releases", githubURL: "charts/github-releases/7/demo-1.2.3.tgz",
@@ -577,10 +575,9 @@ entries:
 				t.Fatalf("sources = %#v", cfg.Repositories)
 			}
 
-			service := New(cfg, err, slog.Default())
-			service.github = tc.backend
+			service := startup.New(cfg, err, slog.Default(), tc.backend, time.Now, context.Background())
 
-			handler := service.Handler()
+			handler := service.Handler
 			index := httptest.NewRecorder()
 			handler.ServeHTTP(index, httptest.NewRequest(http.MethodGet, "/index.yaml", nil))
 			assertStatusCode(t, index.Code, http.StatusOK)
@@ -647,16 +644,15 @@ func TestFlatConfigurationGitHubModesKeepResultsWhenLocalSourceIsEmptyOrUnavaila
 				if err != nil {
 					t.Fatal(err)
 				}
-				service := New(cfg, err, slog.Default())
-				service.github = fakeBackendForMode(mode)
+				service := startup.New(cfg, err, slog.Default(), fakeBackendForMode(mode), time.Now, context.Background())
 				index := httptest.NewRecorder()
-				service.Handler().ServeHTTP(index, httptest.NewRequest(http.MethodGet, "/index.yaml", nil))
+				service.Handler.ServeHTTP(index, httptest.NewRequest(http.MethodGet, "/index.yaml", nil))
 				assertStatusCode(t, index.Code, http.StatusOK)
 				if !strings.Contains(index.Body.String(), "charts/"+mode+"/") {
 					t.Fatalf("GitHub entry missing from index: %s", index.Body.String())
 				}
 				status := httptest.NewRecorder()
-				service.Handler().ServeHTTP(status, httptest.NewRequest(http.MethodGet, "/status", nil))
+				service.Handler.ServeHTTP(status, httptest.NewRequest(http.MethodGet, "/status", nil))
 				want := `"status":"ok"`
 				if localState == "unavailable" {
 					want = `"status":"partial"`
@@ -684,17 +680,16 @@ func TestFlatConfigurationGitHubModesPreserveCombinedSourceFailureBehavior(t *te
 			}
 			backend := fakeBackendForMode(mode)
 			failBackendForMode(backend, mode)
-			service := New(cfg, err, slog.Default())
-			service.github = backend
+			service := startup.New(cfg, err, slog.Default(), backend, time.Now, context.Background())
 
 			index := httptest.NewRecorder()
-			service.Handler().ServeHTTP(index, httptest.NewRequest(http.MethodGet, "/index.yaml", nil))
+			service.Handler.ServeHTTP(index, httptest.NewRequest(http.MethodGet, "/index.yaml", nil))
 			assertStatusCode(t, index.Code, http.StatusOK)
 			if !strings.Contains(index.Body.String(), "charts/local/local-1.0.0.tgz") || strings.Contains(index.Body.String(), "charts/"+mode+"/") {
 				t.Fatalf("partial index = %s", index.Body.String())
 			}
 			status := httptest.NewRecorder()
-			service.Handler().ServeHTTP(status, httptest.NewRequest(http.MethodGet, "/status", nil))
+			service.Handler.ServeHTTP(status, httptest.NewRequest(http.MethodGet, "/status", nil))
 			if !strings.Contains(status.Body.String(), `"status":"partial"`) || !strings.Contains(status.Body.String(), `"name":"`+mode+`"`) || !strings.Contains(status.Body.String(), `"name":"local"`) {
 				t.Fatalf("partial status = %s", status.Body.String())
 			}
@@ -713,10 +708,9 @@ func TestFlatConfigurationGitHubModesPreserveCombinedSourceFailureBehavior(t *te
 				t.Fatal(err)
 			}
 			backend := fakeBackendForMode(mode)
-			service := New(cfg, err, slog.Default())
-			service.github = backend
+			service := startup.New(cfg, err, slog.Default(), backend, time.Now, context.Background())
 			first := httptest.NewRecorder()
-			service.Handler().ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/index.yaml", nil))
+			service.Handler.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/index.yaml", nil))
 			assertStatusCode(t, first.Code, http.StatusOK)
 			if !strings.Contains(first.Body.String(), "charts/"+mode+"/") || !strings.Contains(first.Body.String(), "charts/local/") {
 				t.Fatalf("successful aggregate = %s", first.Body.String())
@@ -727,13 +721,13 @@ func TestFlatConfigurationGitHubModesPreserveCombinedSourceFailureBehavior(t *te
 				t.Fatal(err)
 			}
 			second := httptest.NewRecorder()
-			service.Handler().ServeHTTP(second, httptest.NewRequest(http.MethodGet, "/index.yaml", nil))
+			service.Handler.ServeHTTP(second, httptest.NewRequest(http.MethodGet, "/index.yaml", nil))
 			assertStatusCode(t, second.Code, http.StatusOK)
 			if second.Body.String() != first.Body.String() {
 				t.Fatalf("fallback index = %s, want %s", second.Body.String(), first.Body.String())
 			}
 			status := httptest.NewRecorder()
-			service.Handler().ServeHTTP(status, httptest.NewRequest(http.MethodGet, "/status", nil))
+			service.Handler.ServeHTTP(status, httptest.NewRequest(http.MethodGet, "/status", nil))
 			if !strings.Contains(status.Body.String(), `"status":"stale"`) || !strings.Contains(status.Body.String(), `"last_error":"repositories failed: `+mode+`, local"`) {
 				t.Fatalf("stale status = %s", status.Body.String())
 			}
@@ -757,9 +751,8 @@ func TestFlatConfigurationServesGitHubReleases(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				service := New(cfg, err, slog.Default())
 				requests := 0
-				service.github = githubclient.NewClient(&http.Client{Transport: releaseTransport(func(r *http.Request) (*http.Response, error) {
+				serviceBackend := githubclient.NewClient(&http.Client{Transport: releaseTransport(func(r *http.Request) (*http.Response, error) {
 					requests++
 					if got := r.Header.Get("Authorization"); got != wantAuth {
 						t.Errorf("Authorization = %q, want %q", got, wantAuth)
@@ -778,7 +771,8 @@ func TestFlatConfigurationServesGitHubReleases(t *testing.T) {
 					}
 					return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
 				})})
-				handler := service.Handler()
+				service := startup.New(cfg, err, slog.Default(), serviceBackend, time.Now, context.Background())
+				handler := service.Handler
 				index := httptest.NewRecorder()
 				handler.ServeHTTP(index, httptest.NewRequest(http.MethodGet, "/index.yaml", nil))
 				assertStatusCode(t, index.Code, http.StatusOK)
@@ -834,16 +828,15 @@ func TestFlatConfigurationServesLocalOnlyChartsWithoutGitHub(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := New(cfg, err, slog.Default())
 	fake := &fakeGitHubBackend{releasesErr: errors.New("GitHub must not be contacted")}
-	service.github = fake
+	service := startup.New(cfg, err, slog.Default(), fake, time.Now, context.Background())
 	service.Start()
 
 	deadline := time.Now().Add(time.Second)
 	warmed := false
 	for time.Now().Before(deadline) {
 		status := httptest.NewRecorder()
-		service.Handler().ServeHTTP(status, httptest.NewRequest(http.MethodGet, "/status", nil))
+		service.Handler.ServeHTTP(status, httptest.NewRequest(http.MethodGet, "/status", nil))
 		if strings.Contains(status.Body.String(), `"last_success_at":"`) {
 			warmed = true
 			break
@@ -858,7 +851,7 @@ func TestFlatConfigurationServesLocalOnlyChartsWithoutGitHub(t *testing.T) {
 	}
 
 	index := httptest.NewRecorder()
-	service.Handler().ServeHTTP(index, httptest.NewRequest(http.MethodGet, "/index.yaml", nil))
+	service.Handler.ServeHTTP(index, httptest.NewRequest(http.MethodGet, "/index.yaml", nil))
 	assertStatusCode(t, index.Code, http.StatusOK)
 	var catalog struct {
 		Entries map[string][]struct {
@@ -873,7 +866,7 @@ func TestFlatConfigurationServesLocalOnlyChartsWithoutGitHub(t *testing.T) {
 	}
 
 	download := httptest.NewRecorder()
-	service.Handler().ServeHTTP(download, httptest.NewRequest(http.MethodGet, "/charts/local/"+filename, nil))
+	service.Handler.ServeHTTP(download, httptest.NewRequest(http.MethodGet, "/charts/local/"+filename, nil))
 	assertStatusCode(t, download.Code, http.StatusOK)
 	if download.Header().Get("Content-Type") != "application/gzip" || len(download.Body.Bytes()) < 2 || download.Body.Bytes()[0] != 0x1f || download.Body.Bytes()[1] != 0x8b {
 		t.Fatalf("download = (%q, %q)", download.Header().Get("Content-Type"), download.Body.String())
@@ -884,7 +877,7 @@ func TestFlatConfigurationServesLocalOnlyChartsWithoutGitHub(t *testing.T) {
 		"/charts/chart-releaser/package-in-branch/demo-1.2.3.tgz",
 	} {
 		response := httptest.NewRecorder()
-		service.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+		service.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
 		assertStatusCode(t, response.Code, http.StatusNotFound)
 	}
 	if fake.listCalls != 0 {
@@ -900,15 +893,15 @@ func TestFlatConfigurationServesEmptyLocalOnlyDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := New(cfg, err, slog.Default())
+	service := startup.New(cfg, err, slog.Default(), githubclient.NewClient(nil), time.Now, context.Background())
 	index := httptest.NewRecorder()
-	service.Handler().ServeHTTP(index, httptest.NewRequest(http.MethodGet, "/index.yaml", nil))
+	service.Handler.ServeHTTP(index, httptest.NewRequest(http.MethodGet, "/index.yaml", nil))
 	assertStatusCode(t, index.Code, http.StatusOK)
 	if !strings.Contains(index.Body.String(), "entries: {}") {
 		t.Fatalf("index = %q", index.Body.String())
 	}
 	status := httptest.NewRecorder()
-	service.Handler().ServeHTTP(status, httptest.NewRequest(http.MethodGet, "/status", nil))
+	service.Handler.ServeHTTP(status, httptest.NewRequest(http.MethodGet, "/status", nil))
 	if !strings.Contains(status.Body.String(), `"name":"local"`) || !strings.Contains(status.Body.String(), `"indexed_count":0`) || !strings.Contains(status.Body.String(), `"status":"ok"`) {
 		t.Fatalf("status = %s", status.Body.String())
 	}
@@ -922,12 +915,12 @@ func TestFlatConfigurationReportsUnavailableLocalOnlyDirectoryAsSourceFailure(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := New(cfg, err, slog.Default())
+	service := startup.New(cfg, err, slog.Default(), githubclient.NewClient(nil), time.Now, context.Background())
 	index := httptest.NewRecorder()
-	service.Handler().ServeHTTP(index, httptest.NewRequest(http.MethodGet, "/index.yaml", nil))
+	service.Handler.ServeHTTP(index, httptest.NewRequest(http.MethodGet, "/index.yaml", nil))
 	assertStatusCode(t, index.Code, http.StatusOK)
 	status := httptest.NewRecorder()
-	service.Handler().ServeHTTP(status, httptest.NewRequest(http.MethodGet, "/status", nil))
+	service.Handler.ServeHTTP(status, httptest.NewRequest(http.MethodGet, "/status", nil))
 	if !strings.Contains(status.Body.String(), `"status":"partial"`) || !strings.Contains(status.Body.String(), `"last_error":"repositories failed: local"`) || !strings.Contains(status.Body.String(), `"name":"local"`) || !strings.Contains(status.Body.String(), `"status":"failed"`) {
 		t.Fatalf("status = %s", status.Body.String())
 	}
@@ -956,9 +949,8 @@ func TestFlatConfigurationServesChartReleaser(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			service := New(cfg, err, slog.Default())
 			requests := 0
-			service.github = githubclient.NewClient(&http.Client{Transport: releaseTransport(func(r *http.Request) (*http.Response, error) {
+			serviceBackend := githubclient.NewClient(&http.Client{Transport: releaseTransport(func(r *http.Request) (*http.Response, error) {
 				requests++
 				body := ""
 				switch {
@@ -1012,7 +1004,8 @@ entries:
 				}
 				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
 			})})
-			handler := service.Handler()
+			service := startup.New(cfg, err, slog.Default(), serviceBackend, time.Now, context.Background())
+			handler := service.Handler
 
 			index := httptest.NewRecorder()
 			handler.ServeHTTP(index, httptest.NewRequest(http.MethodGet, "/index.yaml", nil))
@@ -1072,11 +1065,11 @@ func TestFlatConfigurationErrorsKeepHealthAndReadiness(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected configuration error")
 		}
-		service := New(cfg, err, slog.Default())
+		service := startup.New(cfg, err, slog.Default(), githubclient.NewClient(nil), time.Now, context.Background())
 		service.Start()
 		for path, want := range map[string]int{"/healthz": http.StatusOK, "/readyz": http.StatusServiceUnavailable} {
 			response := httptest.NewRecorder()
-			service.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+			service.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
 			assertStatusCode(t, response.Code, want)
 		}
 	}
@@ -1091,15 +1084,14 @@ func TestFlatConfigurationGitHubCacheAndFailureFallback(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			service := New(cfg, err, slog.Default())
 			now := time.Date(2026, 9, 9, 0, 0, 0, 0, time.UTC)
-			service.now = func() time.Time { return now }
+			serviceClock := func() time.Time { return now }
 			backend := &fakeGitHubBackend{releases: []githubclient.Release{{Assets: []githubclient.Asset{{ID: 7, Name: "demo-1.0.0.tgz"}}}}}
-			service.github = backend
+			service := startup.New(cfg, err, slog.Default(), backend, serviceClock, context.Background())
 			get := func(path string) *httptest.ResponseRecorder {
 				t.Helper()
 				response := httptest.NewRecorder()
-				service.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+				service.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
 				assertStatusCode(t, response.Code, http.StatusOK)
 				return response
 			}
@@ -1133,16 +1125,16 @@ func TestFlatConfigurationWarmsGitHubAsynchronously(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := New(cfg, err, slog.Default())
 	entered, release := make(chan struct{}), make(chan struct{})
 	var releaseOnce sync.Once
 	unblock := func() { releaseOnce.Do(func() { close(release) }) }
 	defer unblock()
-	service.github = githubclient.NewClient(&http.Client{Transport: releaseTransport(func(r *http.Request) (*http.Response, error) {
+	serviceBackend := githubclient.NewClient(&http.Client{Transport: releaseTransport(func(r *http.Request) (*http.Response, error) {
 		close(entered)
 		<-release
 		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`[{"assets":[{"id":7,"name":"demo-1.0.0.tgz"}]}]`))}, nil
 	})})
+	service := startup.New(cfg, err, slog.Default(), serviceBackend, time.Now, context.Background())
 	service.Start()
 	select {
 	case <-entered:
@@ -1150,16 +1142,16 @@ func TestFlatConfigurationWarmsGitHubAsynchronously(t *testing.T) {
 		t.Fatal("startup did not query GitHub")
 	}
 	ready := httptest.NewRecorder()
-	service.Handler().ServeHTTP(ready, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	service.Handler.ServeHTTP(ready, httptest.NewRequest(http.MethodGet, "/readyz", nil))
 	assertStatusCode(t, ready.Code, http.StatusOK)
 	unblock()
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		status := httptest.NewRecorder()
-		service.Handler().ServeHTTP(status, httptest.NewRequest(http.MethodGet, "/status", nil))
+		service.Handler.ServeHTTP(status, httptest.NewRequest(http.MethodGet, "/status", nil))
 		if strings.Contains(status.Body.String(), `"last_success_at":"`) {
 			index := httptest.NewRecorder()
-			service.Handler().ServeHTTP(index, httptest.NewRequest(http.MethodGet, "/index.yaml", nil))
+			service.Handler.ServeHTTP(index, httptest.NewRequest(http.MethodGet, "/index.yaml", nil))
 			if !strings.Contains(index.Body.String(), "charts/github-releases/7/demo-1.0.0.tgz") {
 				t.Fatalf("warmed index = %s", index.Body.String())
 			}
@@ -1168,4 +1160,115 @@ func TestFlatConfigurationWarmsGitHubAsynchronously(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatal("startup warm did not complete")
+}
+
+func TestGitHubPackageMembershipFollowsAggregatePublication(t *testing.T) {
+	directory := t.TempDir()
+	backend := &fakeGitHubBackend{
+		releases: []githubclient.Release{{Assets: []githubclient.Asset{{ID: 7, Name: "demo-1.0.0.tgz"}}}},
+		asset:    io.NopCloser(strings.NewReader("published package")),
+	}
+	service := startup.New(config.Config{Repositories: []config.Repository{
+		{Name: "upstream", Type: config.GitHubReleasesType, Owner: "acme", Repo: "charts"},
+		{Name: "local", Type: config.LocalDirectoryType, Path: directory},
+	}}, nil, slog.Default(), backend, time.Now, context.Background())
+	get := func(path string) *httptest.ResponseRecorder {
+		t.Helper()
+		response := httptest.NewRecorder()
+		service.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+		return response
+	}
+	first := get("/index.yaml")
+	assertStatusCode(t, first.Code, http.StatusOK)
+	backend.releases = []githubclient.Release{{Assets: []githubclient.Asset{
+		{ID: 7, Name: "renamed-1.0.0.tgz"},
+		{ID: 8, Name: "demo-2.0.0.tgz"},
+	}}}
+	if err := os.RemoveAll(directory); err != nil {
+		t.Fatal(err)
+	}
+	fallback := get("/index.yaml")
+	assertStatusCode(t, fallback.Code, http.StatusOK)
+	if fallback.Body.String() != first.Body.String() {
+		t.Fatalf("fallback replaced published index: %s", fallback.Body.String())
+	}
+	published := get("/charts/upstream/7/demo-1.0.0.tgz")
+	assertStatusCode(t, published.Code, http.StatusOK)
+	if published.Body.String() != "published package" {
+		t.Fatalf("package = %q", published.Body.String())
+	}
+	for _, path := range []string{
+		"/charts/upstream/7/renamed-1.0.0.tgz",
+		"/charts/upstream/8/demo-2.0.0.tgz",
+		"/charts/upstream/0/demo-1.0.0.tgz",
+		"/charts/upstream/invalid/demo-1.0.0.tgz",
+		"/charts/inactive/7/demo-1.0.0.tgz",
+	} {
+		t.Run(path, func(t *testing.T) { assertStatusCode(t, get(path).Code, http.StatusNotFound) })
+	}
+	if err := os.Mkdir(directory, 0755); err != nil {
+		t.Fatal(err)
+	}
+	assertStatusCode(t, get("/index.yaml").Code, http.StatusOK)
+	assertStatusCode(t, get("/charts/upstream/7/demo-1.0.0.tgz").Code, http.StatusNotFound)
+	assertStatusCode(t, get("/charts/upstream/8/demo-2.0.0.tgz").Code, http.StatusOK)
+}
+
+func TestChartReleaserDirectDownloadsBeforeAndAfterFailedRefresh(t *testing.T) {
+	type contextKey struct{}
+	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), contextKey{}, "download"))
+	defer cancel()
+	indexRequests, downloadRequests := 0, 0
+	serviceBackend := githubclient.NewClient(&http.Client{Transport: releaseTransport(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/repos/acme/charts/contents/index.yaml" {
+			indexRequests++
+			return &http.Response{StatusCode: http.StatusBadGateway, Body: io.NopCloser(strings.NewReader("failed")), Header: make(http.Header)}, nil
+		}
+		downloadRequests++
+		if r.Context().Value(contextKey{}) != "download" || r.Header.Get("Authorization") != "Bearer secret" {
+			t.Errorf("download context or authentication changed")
+		}
+		switch r.URL.Path {
+		case "/acme/charts/releases/download/v1/nested/unindexed.tgz":
+			if r.URL.Host != "github.com" {
+				t.Errorf("release host = %q", r.URL.Host)
+			}
+		case "/repos/acme/charts/contents/packages/nested/unindexed.tgz":
+			if r.URL.Query().Get("ref") != "custom" {
+				t.Errorf("branch = %s", r.URL)
+			}
+		default:
+			t.Errorf("unexpected download: %s", r.URL)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("direct bytes")), Header: make(http.Header)}, nil
+	})})
+	service := startup.New(config.Config{Repositories: []config.Repository{{Name: "pages", Type: config.ChartReleaserType, Owner: "acme", Repo: "charts", Branch: "custom", GitHubToken: "secret"}}}, nil, slog.Default(), serviceBackend, time.Now, context.Background())
+	handler := service.Handler
+	for _, phase := range []string{"before refresh", "after failed refresh"} {
+		t.Run(phase, func(t *testing.T) {
+			if phase == "after failed refresh" {
+				response := httptest.NewRecorder()
+				handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/index.yaml", nil))
+				assertStatusCode(t, response.Code, http.StatusOK)
+				if strings.Contains(response.Body.String(), "unindexed") {
+					t.Fatal("failed source published a package")
+				}
+			}
+			for _, invalid := range []string{"/charts/pages/v1%2Funindexed.tgz", "/charts/pages/v1%252Funindexed.tgz", "/charts/pages/v1/nested%2Funindexed.tgz", "/charts/pages/v1/nested%252Funindexed.tgz"} {
+				response := httptest.NewRecorder()
+				handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, invalid, nil).WithContext(ctx))
+				assertStatusCode(t, response.Code, http.StatusNotFound)
+			}
+			for _, path := range []string{"/charts/pages/v1/nested/unindexed.tgz", "/charts/pages/package-in-branch/packages/nested/unindexed.tgz"} {
+				response := httptest.NewRecorder()
+				handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil).WithContext(ctx))
+				if response.Code != http.StatusOK || response.Body.String() != "direct bytes" || response.Header().Get("Content-Type") != "application/gzip" || response.Header().Get("Content-Disposition") != `attachment; filename="unindexed.tgz"` {
+					t.Fatalf("GET %s = %d, %q, %v", path, response.Code, response.Body.String(), response.Header())
+				}
+			}
+		})
+	}
+	if indexRequests != 1 || downloadRequests != 4 {
+		t.Fatalf("upstream index/download requests = %d/%d", indexRequests, downloadRequests)
+	}
 }
