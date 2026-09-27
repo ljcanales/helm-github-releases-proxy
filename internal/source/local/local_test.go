@@ -1,6 +1,10 @@
 package local_test
 
 import (
+	"bytes"
+	"encoding/json"
+	"helm-github-releases-proxy/internal/logging"
+
 	"archive/tar"
 	"compress/gzip"
 	"context"
@@ -151,5 +155,68 @@ func writeChart(t *testing.T, filename, name, version, payload string) {
 	modified := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
 	if err := os.Chtimes(filename, modified, modified); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestSourceDiagnosticsRedactURLs(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "demo-1.0.0.tgz")
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gzipWriter := gzip.NewWriter(file)
+	tarWriter := tar.NewWriter(gzipWriter)
+	metadata := "name: demo\nversion: 1.0.0\nhttps://secret.example/private?sig=credential: a\nhttps://secret.example/private?sig=credential: b\n"
+	if err := tarWriter.WriteHeader(&tar.Header{Name: "demo/Chart.yaml", Mode: 0600, Size: int64(len(metadata))}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tarWriter.Write([]byte(metadata)); err != nil {
+		t.Fatal(err)
+	}
+	for _, close := range []func() error{tarWriter.Close, gzipWriter.Close, file.Close} {
+		if err := close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var output bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&output, nil))
+	ctx := logging.WithFields(logging.WithTraceID(context.Background(), "trace"), "refresh_id", "refresh")
+	result, err := local.New("local", directory, logger).Discover(ctx)
+	if err != nil || result.SkippedCount != 1 {
+		t.Fatalf("result = %#v, error = %v", result, err)
+	}
+
+	found := false
+	raw := output.String()
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	for decoder.More() {
+		var event map[string]any
+		if err := decoder.Decode(&event); err != nil {
+			t.Fatal(err)
+		}
+		if event["msg"] == "skipping local chart" {
+			found = true
+			if event["source_path"] != directory || event["trace_id"] != "trace" || event["refresh_id"] != "refresh" || !strings.Contains(event["error"].(string), "<url-redacted>") {
+				t.Fatalf("diagnostic = %#v", event)
+			}
+		}
+	}
+	if !found || strings.Contains(raw, "credential") || strings.Contains(raw, "secret.example") {
+		t.Fatalf("unsafe or missing diagnostic: %s", output.String())
+	}
+}
+
+func TestSourceDiscoveryErrorPreservesOnlyDiagnosticPath(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "missing-charts")
+	_, err := local.New("local", directory, slog.Default()).Discover(context.Background())
+	if err == nil {
+		t.Fatal("expected discovery error")
+	}
+	if strings.Contains(err.Error(), directory) {
+		t.Fatalf("public path leaked: %v", err)
+	}
+	if diagnostic := logging.RedactError(err); !strings.Contains(diagnostic, directory) {
+		t.Fatalf("diagnostic path missing: %s", diagnostic)
 	}
 }

@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -13,16 +12,18 @@ import (
 	"helm-github-releases-proxy/internal/app"
 	"helm-github-releases-proxy/internal/config"
 	githubclient "helm-github-releases-proxy/internal/github"
+	"helm-github-releases-proxy/internal/logging"
 )
 
 func main() {
 	cfg, configErr := config.LoadWithLookup(config.EnvironmentLookup)
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel}))
+	logger := logging.NewJSON(os.Stdout, cfg.LogLevel)
+	events := logging.New(logger)
 	if configErr != nil {
-		logger.Error("invalid configuration", "error", configErr)
+		events.Error(context.Background(), "invalid configuration", "error", configErr)
 	}
 
-	service := app.New(cfg, configErr, logger, githubclient.NewClient(nil), time.Now, context.Background())
+	service := app.New(cfg, configErr, logger, githubclient.NewClient(nil, logger), time.Now, context.Background())
 	service.Start()
 	server := &http.Server{
 		Addr:    ":" + itoa(cfg.Port),
@@ -36,13 +37,13 @@ func main() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancel()
 		if err := server.Shutdown(shutdownCtx); err != nil {
-			logger.Error("server shutdown failed", "error", err)
+			events.Error(shutdownCtx, "server shutdown failed", "error", err)
 		}
 	}()
 
-	logger.Info("server starting", "addr", server.Addr)
+	events.Info(context.Background(), "server starting", "addr", server.Addr)
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		logger.Error("server stopped", "error", err)
+		events.Error(context.Background(), "server stopped", "error", err)
 		os.Exit(1)
 	}
 }

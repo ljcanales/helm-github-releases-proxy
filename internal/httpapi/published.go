@@ -18,7 +18,7 @@ import (
 
 // PublishedOperations is the repository boundary consumed by the assembled app.
 type PublishedOperations interface {
-	Index() (repository.Index, error)
+	IndexContext(context.Context) (repository.Index, error)
 	Status() repository.Status
 	OpenPackage(context.Context, string, string) (repository.ChartPackage, error)
 }
@@ -79,14 +79,16 @@ func (service *PublishedService) ready(writer http.ResponseWriter, _ *http.Reque
 	writeJSON(writer, http.StatusOK, `{"status":"ok"}`)
 }
 
-func (service *PublishedService) index(writer http.ResponseWriter, _ *http.Request) {
-	index, err := service.operations.Index()
+func (service *PublishedService) index(writer http.ResponseWriter, request *http.Request) {
+	index, err := service.operations.IndexContext(request.Context())
 	if err != nil {
+		RecordError(request.Context(), err)
 		writePlainError(writer, http.StatusInternalServerError, err.Error())
 		return
 	}
 	data, err := yaml.Marshal(publishedIndex{APIVersion: "v1", Generated: index.Generated.Format(time.RFC3339Nano), Entries: publishedEntries(index.Entries)})
 	if err != nil {
+		RecordError(request.Context(), err)
 		writePlainError(writer, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -95,7 +97,7 @@ func (service *PublishedService) index(writer http.ResponseWriter, _ *http.Reque
 	_, _ = writer.Write(data)
 }
 
-func (service *PublishedService) status(writer http.ResponseWriter, _ *http.Request) {
+func (service *PublishedService) status(writer http.ResponseWriter, request *http.Request) {
 	snapshot := service.operations.Status()
 	response := statusResponse{Status: snapshot.Status, Stale: snapshot.Stale, LastAttempt: snapshot.LastAttempt, LastSuccess: snapshot.LastSuccess, CachedAt: snapshot.CachedAt, CacheExpires: snapshot.CacheExpires, CachePresent: snapshot.CachePresent, LastError: snapshot.LastError, Repositories: make([]repositoryStatus, 0, len(snapshot.Repositories))}
 	for _, source := range snapshot.Repositories {
@@ -103,6 +105,7 @@ func (service *PublishedService) status(writer http.ResponseWriter, _ *http.Requ
 	}
 	data, err := json.Marshal(response)
 	if err != nil {
+		RecordError(request.Context(), err)
 		writePlainError(writer, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -119,6 +122,7 @@ func (service *PublishedService) packageDownload(writer http.ResponseWriter, req
 		return
 	}
 	if err != nil {
+		RecordError(request.Context(), err)
 		writePlainError(writer, http.StatusBadGateway, err.Error())
 		return
 	}
@@ -126,7 +130,11 @@ func (service *PublishedService) packageDownload(writer http.ResponseWriter, req
 	writer.Header().Set("Content-Type", "application/gzip")
 	writer.Header().Set("Content-Disposition", `attachment; filename="`+pkg.Filename+`"`)
 	writer.WriteHeader(http.StatusOK)
-	_, _ = io.Copy(writer, pkg.Body)
+	// A copy failure belongs to the committed response event. The byte count
+	// reflects what the response writer accepted, not confirmed client receipt.
+	if _, err := io.Copy(writer, pkg.Body); err != nil {
+		RecordError(request.Context(), err)
+	}
 }
 
 type publishedIndex struct {

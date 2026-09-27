@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"helm-github-releases-proxy/internal/chart"
+	"helm-github-releases-proxy/internal/logging"
 )
 
 var ErrPackageNotFound = errors.New("chart not found")
@@ -21,6 +22,9 @@ func WithClock(now func() time.Time) Option { return func(service *Service) { se
 
 func WithRefreshContext(ctx context.Context) Option {
 	return func(service *Service) { service.refreshContext = ctx }
+}
+func WithLogger(events logging.Logger) Option {
+	return func(service *Service) { service.events = events }
 }
 
 type publication struct {
@@ -38,6 +42,7 @@ type Service struct {
 	ttl            time.Duration
 	now            func() time.Time
 	refreshContext context.Context
+	events         logging.Logger
 
 	mu      sync.RWMutex
 	buildMu sync.Mutex
@@ -75,7 +80,7 @@ func New(sources Sources, options ...Option) *Service {
 func (service *Service) Start(onError func(error)) {
 	service.warm.Do(func() {
 		go func() {
-			_, err := service.Index()
+			_, err := service.IndexContext(context.Background())
 			if err != nil && onError != nil {
 				onError(err)
 			}
@@ -83,7 +88,9 @@ func (service *Service) Start(onError func(error)) {
 	})
 }
 
-func (service *Service) Index() (Index, error) { return service.refresh() }
+func (service *Service) Index() (Index, error) { return service.IndexContext(context.Background()) }
+
+func (service *Service) IndexContext(ctx context.Context) (Index, error) { return service.refresh(ctx) }
 
 // OpenPackage performs an exact lookup using the escaped path advertised in the
 // index. It never triggers or waits for discovery, and opens bytes after releasing
@@ -127,7 +134,7 @@ func (service *Service) OpenPackage(ctx context.Context, sourceName, advertisedP
 	return pkg, err
 }
 
-func (service *Service) refresh() (Index, error) {
+func (service *Service) refresh(caller context.Context) (Index, error) {
 	service.buildMu.Lock()
 	defer service.buildMu.Unlock()
 
@@ -140,16 +147,25 @@ func (service *Service) refresh() (Index, error) {
 	}
 	service.mu.RUnlock()
 
+	started := time.Now()
+	traceID := logging.TraceID(caller)
+	if traceID == "" {
+		traceID = logging.NewTraceID()
+	}
+	refreshID := logging.NewTraceID()
+	discoveryContext := logging.WithFields(logging.WithTraceID(service.refreshContext, traceID), "refresh_id", refreshID)
 	aggregate := make(chart.Aggregate)
 	lookup := make(map[string]publishedPackage)
 	statuses := make([]SourceStatus, 0, len(service.sources))
+	outcomes := make([]any, 0, len(service.sources))
 	failed := make([]string, 0)
 	for sourceIndex, source := range service.sources {
 		status := newSourceStatus(source.Config)
-		contribution, err := source.Discovery.Discover(service.refreshContext)
+		contribution, err := source.Discovery.Discover(discoveryContext)
 		if err != nil {
 			status.Status = "failed"
 			status.Error = sanitizeError(err, source.Config.Path)
+			outcomes = append(outcomes, sourceOutcome(status, err))
 			failed = append(failed, source.Config.Name)
 			statuses = append(statuses, status)
 			continue
@@ -170,31 +186,65 @@ func (service *Service) refresh() (Index, error) {
 			aggregate.Add(version)
 		}
 		statuses = append(statuses, status)
+		outcomes = append(outcomes, sourceOutcome(status, nil))
 	}
 	candidate := publication{index: Index{Generated: now, Entries: aggregate.Finalize()}, lookup: lookup}
+	result := refreshPublished
+	if len(failed) > 0 {
+		result = refreshPartial
+	}
 
 	service.mu.Lock()
-	defer service.mu.Unlock()
 	service.lastAttempt = now
 	service.sourceStatuses = statuses
 	service.lastError = ""
+	var index Index
 	if len(failed) > 0 {
 		service.lastError = "repositories failed: " + strings.Join(failed, ", ")
 		if service.published != nil {
 			service.stale = true
-			return cloneIndex(service.published.index), nil
+			result = refreshStaleRetained
+			index = cloneIndex(service.published.index)
+		} else {
+			service.published = clonePublication(candidate)
+			service.stale = false
+			index = cloneIndex(candidate.index)
 		}
+	} else {
 		service.published = clonePublication(candidate)
+		service.cachedAt = now
+		service.expiresAt = now.Add(service.ttl)
+		service.lastSuccess = now
 		service.stale = false
-		return cloneIndex(candidate.index), nil
+		index = cloneIndex(candidate.index)
 	}
+	service.mu.Unlock()
+	if service.events != nil {
+		emit := service.events.Info
+		if result != refreshPublished {
+			emit = service.events.Warn
+		}
+		emit(discoveryContext, "repository.refresh.completed", "duration_ms", time.Since(started).Milliseconds(),
+			"result", result, "sources", outcomes)
+	}
+	return index, nil
+}
 
-	service.published = clonePublication(candidate)
-	service.cachedAt = now
-	service.expiresAt = now.Add(service.ttl)
-	service.lastSuccess = now
-	service.stale = false
-	return cloneIndex(candidate.index), nil
+type refreshResult string
+
+const (
+	refreshPublished     refreshResult = "published"
+	refreshPartial       refreshResult = "partial"
+	refreshStaleRetained refreshResult = "stale_retained"
+)
+
+func sourceOutcome(status SourceStatus, err error) map[string]any {
+	fields := map[string]any{"name": status.Name, "status": status.Status,
+		"indexed_count": status.IndexedCount, "skipped_count": status.SkippedCount}
+	if err != nil {
+		fields["error"] = err
+	}
+	return fields
 }
 
 type Index struct {

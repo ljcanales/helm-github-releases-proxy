@@ -1,6 +1,9 @@
 package app_test
 
 import (
+	"bytes"
+	"log/slog"
+
 	"context"
 	"errors"
 	"io"
@@ -202,5 +205,119 @@ func assertReleaseDownloadStatus(t *testing.T, runtime *app.Runtime, suffix stri
 	response := request(runtime.Handler, http.MethodGet, "http://example.test/charts/releases/"+suffix)
 	if response.Code != want {
 		t.Fatalf("GET %s = %d %q, want %d", suffix, response.Code, response.Body.String(), want)
+	}
+}
+
+type githubTransportFunc func(*http.Request) (*http.Response, error)
+
+func (f githubTransportFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
+
+func githubResponse(status int, body string, header http.Header) *http.Response {
+	return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body)), Header: header}
+}
+
+func TestAssembledGitHubDiscoveryCorrelation(t *testing.T) {
+	var output bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	transport := githubTransportFunc(func(request *http.Request) (*http.Response, error) {
+		return githubResponse(http.StatusOK, `[{"assets":[{"id":7,"name":"demo-1.0.0.tgz"},{"id":8,"name":"notes.txt"}]}]`, make(http.Header)), nil
+	})
+	runtime := app.New(releaseConfig(60), nil, logger, githubclient.NewClient(&http.Client{Transport: transport}, logger), fixedClock, context.Background())
+	if response := request(runtime.Handler, http.MethodGet, "http://example.test/index.yaml"); response.Code != http.StatusOK {
+		t.Fatalf("index = %d", response.Code)
+	}
+	events := decodeEvents(t, output.Bytes())
+	var refreshes []map[string]any
+	for _, event := range events {
+		if event["msg"] == "repository.refresh.completed" {
+			refreshes = append(refreshes, event)
+		}
+	}
+	if len(refreshes) != 1 {
+		t.Fatalf("refreshes = %#v", refreshes)
+	}
+	refresh := refreshes[0]
+	seenOperation, seenDiagnostic := false, false
+	for _, event := range events {
+		switch event["msg"] {
+		case "github.request.completed":
+			seenOperation = true
+		case "skipping non-chart GitHub release asset":
+			seenDiagnostic = true
+		default:
+			continue
+		}
+		if event["trace_id"] != refresh["trace_id"] || event["refresh_id"] != refresh["refresh_id"] {
+			t.Fatalf("correlation = %#v", event)
+		}
+	}
+	if !seenOperation || !seenDiagnostic || refresh["trace_id"] != events[0]["trace_id"] {
+		t.Fatalf("events = %#v", events)
+	}
+}
+
+func TestAssembledDownloadCorrelatesGitHubOperation(t *testing.T) {
+	var output bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&output, nil))
+	transport := githubTransportFunc(func(r *http.Request) (*http.Response, error) {
+		body := "chart bytes"
+		if strings.HasSuffix(r.URL.Path, "/releases") {
+			body = `[{"assets":[{"id":7,"name":"demo-1.0.0.tgz"}]}]`
+		}
+		return githubResponse(http.StatusOK, body, make(http.Header)), nil
+	})
+	runtime := app.New(releaseConfig(60), nil, logger, githubclient.NewClient(&http.Client{Transport: transport}, logger), fixedClock, context.Background())
+	request(runtime.Handler, http.MethodGet, "http://example.test/index.yaml")
+	output.Reset()
+	response := request(runtime.Handler, http.MethodGet, "http://example.test/charts/releases/7/demo-1.0.0.tgz")
+	events := decodeEvents(t, output.Bytes())
+	if response.Code != http.StatusOK || response.Body.String() != "chart bytes" || len(events) != 3 {
+		t.Fatalf("response = %d %q, events = %#v", response.Code, response.Body.String(), events)
+	}
+	trace := events[0]["trace_id"]
+	if trace == nil || trace == "" {
+		t.Fatalf("missing trace: %#v", events)
+	}
+	for i, name := range []string{"http.request", "github.request.completed", "http.response"} {
+		if events[i]["msg"] != name || events[i]["trace_id"] != trace {
+			t.Fatalf("events = %#v", events)
+		}
+	}
+	if events[1]["source"] != "releases" {
+		t.Fatalf("operation = %#v", events[1])
+	}
+}
+
+func TestAssembledTokenRedactionPreservesPublicErrors(t *testing.T) {
+	for _, discoveryFails := range []bool{false, true} {
+		t.Run(map[bool]string{false: "download", true: "discovery"}[discoveryFails], func(t *testing.T) {
+			var output bytes.Buffer
+			logger := slog.New(slog.NewJSONHandler(&output, nil))
+			cfg := releaseConfig(60)
+			cfg.Sources[0].GitHubToken = "private-token"
+			transport := githubTransportFunc(func(request *http.Request) (*http.Response, error) {
+				if !discoveryFails && strings.HasSuffix(request.URL.Path, "/releases") {
+					return githubResponse(200, `[{"assets":[{"id":7,"name":"demo-1.0.0.tgz"}]}]`, make(http.Header)), nil
+				}
+				return nil, errors.New("transport rejected private-token")
+			})
+			runtime := app.New(cfg, nil, logger, githubclient.NewClient(&http.Client{Transport: transport}, logger), fixedClock, context.Background())
+			request(runtime.Handler, http.MethodGet, "http://example.test/index.yaml")
+			target := "http://example.test/charts/releases/7/demo-1.0.0.tgz"
+			wantStatus := http.StatusBadGateway
+			if discoveryFails {
+				target = "http://example.test/status"
+				wantStatus = http.StatusOK
+			}
+			response := request(runtime.Handler, http.MethodGet, target)
+			if response.Code != wantStatus || !strings.Contains(response.Body.String(), "transport rejected private-token") {
+				t.Fatalf("public response changed: %d %s", response.Code, response.Body.String())
+			}
+			if strings.Contains(output.String(), "private-token") || !strings.Contains(output.String(), "token-redacted") {
+				t.Fatalf("unsafe diagnostic: %s", output.String())
+			}
+		})
 	}
 }

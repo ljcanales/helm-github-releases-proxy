@@ -3,6 +3,7 @@ package local
 import (
 	"archive/tar"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+	"helm-github-releases-proxy/internal/logging"
 )
 
 type archive struct {
@@ -27,7 +29,8 @@ type archive struct {
 
 var filenamePattern = regexp.MustCompile(`^(?P<name>[^/\\]+)-(?P<version>v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)\.tgz$`)
 
-func scan(directory string, logger *slog.Logger) ([]archive, int, error) {
+func scan(ctx context.Context, directory string, logger *slog.Logger) ([]archive, int, error) {
+	events := logging.New(logger)
 	entries, err := os.ReadDir(directory)
 	if err != nil {
 		return nil, 0, err
@@ -41,13 +44,13 @@ func scan(directory string, logger *slog.Logger) ([]archive, int, error) {
 		info, err := entry.Info()
 		if err != nil || !info.Mode().IsRegular() || entry.Type()&os.ModeSymlink != 0 {
 			skipped++
-			logger.Warn("skipping local chart", "source_path", directory, "filename", entry.Name(), "error", "not a regular file")
+			events.Warn(ctx, "skipping local chart", "source_path", directory, "filename", entry.Name(), "error", "not a regular file")
 			continue
 		}
 		chartArchive, err := inspect(filepath.Join(directory, entry.Name()), entry.Name(), info.ModTime())
 		if err != nil {
 			skipped++
-			logger.Warn("skipping local chart", "source_path", directory, "filename", entry.Name(), "error", err)
+			events.Warn(ctx, "skipping local chart", "source_path", directory, "filename", entry.Name(), "error", err)
 			continue
 		}
 		archives = append(archives, chartArchive)

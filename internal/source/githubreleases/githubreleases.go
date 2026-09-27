@@ -13,6 +13,7 @@ import (
 
 	"helm-github-releases-proxy/internal/chart"
 	githubclient "helm-github-releases-proxy/internal/github"
+	"helm-github-releases-proxy/internal/logging"
 	"helm-github-releases-proxy/internal/repository"
 )
 
@@ -42,7 +43,8 @@ func New(name, owner, repo string, backend Backend, logger *slog.Logger, options
 }
 
 func (source *Source) Discover(ctx context.Context) (repository.Contribution, error) {
-	releases, err := source.backend.ListReleases(ctx, source.owner, source.repo, source.token)
+	events := logging.New(source.logger)
+	releases, err := source.backend.ListReleases(githubclient.WithSource(ctx, source.name), source.owner, source.repo, source.token)
 	if err != nil {
 		return repository.Contribution{}, err
 	}
@@ -51,13 +53,13 @@ func (source *Source) Discover(ctx context.Context) (repository.Contribution, er
 		for _, asset := range release.Assets {
 			if !strings.HasSuffix(asset.Name, ".tgz") {
 				result.SkippedCount++
-				source.logger.Debug("skipping non-chart GitHub release asset", "source", source.name, "filename", asset.Name)
+				events.Debug(ctx, "skipping non-chart GitHub release asset", "source", source.name, "filename", asset.Name)
 				continue
 			}
 			name, version, ok := parseChartFilename(asset.Name)
 			if !ok {
 				result.SkippedCount++
-				source.logger.Debug("skipping invalid GitHub chart filename", "source", source.name, "filename", asset.Name)
+				events.Debug(ctx, "skipping invalid GitHub chart filename", "source", source.name, "filename", asset.Name)
 				continue
 			}
 			key := strconv.FormatInt(asset.ID, 10) + "/" + asset.Name
@@ -80,7 +82,7 @@ func (source *Source) Discover(ctx context.Context) (repository.Contribution, er
 		}
 	}
 	if result.SkippedCount > 0 {
-		source.logger.Debug("skipped GitHub release assets", "source", source.name, "count", result.SkippedCount)
+		events.Debug(ctx, "skipped GitHub release assets", "source", source.name, "count", result.SkippedCount)
 	}
 	return result, nil
 }
@@ -93,7 +95,7 @@ func (source *Source) OpenPackage(ctx context.Context, reference repository.Pack
 	if reference.Source != source.name || !ok || err != nil || assetID < 1 || strconv.FormatInt(assetID, 10) != id || filename == "" || filepath.Base(filename) != filename || strings.ContainsAny(filename, `/\`) || filename == "." || filename == ".." {
 		return repository.ChartPackage{}, repository.ErrPackageNotFound
 	}
-	body, err := source.backend.DownloadAsset(ctx, source.owner, source.repo, assetID, source.token)
+	body, err := source.backend.DownloadAsset(githubclient.WithSource(ctx, source.name), source.owner, source.repo, assetID, source.token)
 	if err != nil {
 		return repository.ChartPackage{}, err
 	}
