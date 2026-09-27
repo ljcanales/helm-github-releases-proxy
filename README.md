@@ -21,7 +21,7 @@ All endpoints use `GET`.
 | --- | --- |
 | `/index.yaml` | Helm repository index used by `helm repo add` and `helm repo update`. |
 | `/charts/...` | Download chart packages from the configured sources. |
-| `/healthz` | Check that the server is running. |
+| `/livez` | Check that the server is running. |
 | `/readyz` | Check that configuration is valid; does not check source availability. |
 | `/status` | Inspect index status, source errors, chart counts, and cache timestamps. |
 
@@ -29,7 +29,7 @@ Chart download routes serve GitHub release assets, chart-releaser packages store
 in releases or on the configured branch, and local packages. Helm follows the
 download URLs generated in the index automatically.
 
-`/healthz` returns `200` with `{"status":"ok"}`. `/readyz` returns `200` when
+`/livez` returns `200` with `{"status":"ok"}`. `/readyz` returns `200` when
 configuration is valid, otherwise `503` with `{"status":"not_ready"}`. Invalid
 configuration is also logged at startup. The initial index build runs
 asynchronously; readiness does not wait for it to finish.
