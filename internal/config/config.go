@@ -11,33 +11,35 @@ import (
 
 const defaultPort = 8080
 
-// Config contains the global settings and configured chart repositories.
+// Config contains the global settings and configured chart sources.
 type Config struct {
 	Port            int
 	CacheTTLSeconds int
 	LogLevel        slog.Level
-	Repositories    []Repository
+	Sources         Sources
 }
 
-type RepositoryType string
+type SourceKind string
 
 const (
-	GitHubReleasesType RepositoryType = "github-releases"
-	ChartReleaserType  RepositoryType = "chart-releaser"
-	LocalDirectoryType RepositoryType = "local-directory"
+	GitHubReleasesKind SourceKind = "github-releases"
+	ChartReleaserKind  SourceKind = "chart-releaser"
+	LocalSourceKind    SourceKind = "local-directory"
 )
 
-// Repository is the validated, type-specific configuration for one chart
-// source. Fields not used by a repository type remain empty.
-type Repository struct {
+// SourceConfig is the validated, kind-specific configuration for one chart
+// source. Fields not used by a source kind remain empty.
+type SourceConfig struct {
 	Name        string
-	Type        RepositoryType
+	Kind        SourceKind
 	Owner       string
 	Repo        string
 	Branch      string
 	Path        string
 	GitHubToken string
 }
+
+type Sources []SourceConfig
 
 // Load reads the settings currently supported by the Go service. It returns a
 // usable config along with an error so the HTTP server can expose /readyz even
@@ -52,7 +54,7 @@ func Load(getenv func(string) string) (Config, error) {
 // LoadWithLookup reads flat environment settings for the selected chart source.
 func LoadWithLookup(lookup func(string) (string, bool)) (Config, error) {
 	cfg := Config{Port: defaultPort, CacheTTLSeconds: 60, LogLevel: slog.LevelInfo}
-	cfg.Repositories = []Repository{}
+	cfg.Sources = Sources{}
 	var firstErr error
 
 	if value, ok := lookup("PORT"); ok && strings.TrimSpace(value) != "" {
@@ -92,20 +94,20 @@ func LoadWithLookup(lookup func(string) (string, bool)) (Config, error) {
 	mode, _ := lookup("MODE")
 	mode = strings.TrimSpace(mode)
 	if mode == "" {
-		mode = string(GitHubReleasesType)
+		mode = string(GitHubReleasesKind)
 	}
 	var sourceErr error
 	switch mode {
-	case string(GitHubReleasesType):
+	case string(GitHubReleasesKind):
 		owner, repo, err := githubOwnerAndRepo(lookup, mode)
 		if err != nil {
 			sourceErr = err
 		} else {
 			token, _ := lookup("GITHUB_TOKEN")
-			cfg.Repositories = []Repository{{Name: mode, Type: GitHubReleasesType, Owner: owner, Repo: repo, GitHubToken: token}}
+			cfg.Sources = Sources{{Name: mode, Kind: GitHubReleasesKind, Owner: owner, Repo: repo, GitHubToken: token}}
 			sourceErr = appendOptionalLocalSource(&cfg, lookup)
 		}
-	case string(ChartReleaserType):
+	case string(ChartReleaserKind):
 		owner, repo, err := githubOwnerAndRepo(lookup, mode)
 		if err != nil {
 			sourceErr = err
@@ -116,7 +118,7 @@ func LoadWithLookup(lookup func(string) (string, bool)) (Config, error) {
 				branch = "gh-pages"
 			}
 			token, _ := lookup("GITHUB_TOKEN")
-			cfg.Repositories = []Repository{{Name: mode, Type: ChartReleaserType, Owner: owner, Repo: repo, Branch: branch, GitHubToken: token}}
+			cfg.Sources = Sources{{Name: mode, Kind: ChartReleaserKind, Owner: owner, Repo: repo, Branch: branch, GitHubToken: token}}
 			sourceErr = appendOptionalLocalSource(&cfg, lookup)
 		}
 	case "local-only":
@@ -125,7 +127,7 @@ func LoadWithLookup(lookup func(string) (string, bool)) (Config, error) {
 		if path == "" || !filepath.IsAbs(path) {
 			sourceErr = fmt.Errorf("local-only requires a nonempty absolute LOCAL_PATH")
 		} else {
-			cfg.Repositories = []Repository{{Name: "local", Type: LocalDirectoryType, Path: path}}
+			cfg.Sources = Sources{{Name: "local", Kind: LocalSourceKind, Path: path}}
 		}
 	default:
 		sourceErr = fmt.Errorf("unsupported MODE %q", mode)
@@ -145,7 +147,7 @@ func appendOptionalLocalSource(cfg *Config, lookup func(string) (string, bool)) 
 	if !filepath.IsAbs(path) {
 		return fmt.Errorf("LOCAL_PATH must be absolute when supplied")
 	}
-	cfg.Repositories = append(cfg.Repositories, Repository{Name: "local", Type: LocalDirectoryType, Path: path})
+	cfg.Sources = append(cfg.Sources, SourceConfig{Name: "local", Kind: LocalSourceKind, Path: path})
 	return nil
 }
 

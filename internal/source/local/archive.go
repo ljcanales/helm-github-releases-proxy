@@ -1,4 +1,4 @@
-package localcharts
+package local
 
 import (
 	"archive/tar"
@@ -17,25 +17,22 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-type Chart struct {
-	Name     string
-	Version  string
-	Filename string
-	Path     string
-	Digest   string
-	Created  time.Time
+type archive struct {
+	name     string
+	version  string
+	filename string
+	digest   string
+	created  time.Time
 }
 
 var filenamePattern = regexp.MustCompile(`^(?P<name>[^/\\]+)-(?P<version>v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)\.tgz$`)
 
-// Scan discovers valid chart packages that are direct children of directory.
-// Invalid packages are skipped and included in the returned count.
-func Scan(directory string, logger *slog.Logger) ([]Chart, int, error) {
+func scan(directory string, logger *slog.Logger) ([]archive, int, error) {
 	entries, err := os.ReadDir(directory)
 	if err != nil {
 		return nil, 0, err
 	}
-	charts := make([]Chart, 0)
+	archives := make([]archive, 0)
 	skipped := 0
 	for _, entry := range entries {
 		if !strings.HasSuffix(entry.Name(), ".tgz") {
@@ -44,44 +41,44 @@ func Scan(directory string, logger *slog.Logger) ([]Chart, int, error) {
 		info, err := entry.Info()
 		if err != nil || !info.Mode().IsRegular() || entry.Type()&os.ModeSymlink != 0 {
 			skipped++
-			logger.Warn("skipping local chart", "repository_path", directory, "filename", entry.Name(), "error", "not a regular file")
+			logger.Warn("skipping local chart", "source_path", directory, "filename", entry.Name(), "error", "not a regular file")
 			continue
 		}
-		chart, err := readChart(filepath.Join(directory, entry.Name()), entry.Name(), info.ModTime())
+		chartArchive, err := inspect(filepath.Join(directory, entry.Name()), entry.Name(), info.ModTime())
 		if err != nil {
 			skipped++
-			logger.Warn("skipping local chart", "repository_path", directory, "filename", entry.Name(), "error", err)
+			logger.Warn("skipping local chart", "source_path", directory, "filename", entry.Name(), "error", err)
 			continue
 		}
-		charts = append(charts, chart)
+		archives = append(archives, chartArchive)
 	}
-	return charts, skipped, nil
+	return archives, skipped, nil
 }
 
-func readChart(path, filename string, modified time.Time) (Chart, error) {
+func inspect(path, filename string, modified time.Time) (archive, error) {
 	match := filenamePattern.FindStringSubmatch(filename)
 	if match == nil {
-		return Chart{}, fmt.Errorf("filename does not match '<chart-name>-<version>.tgz'")
+		return archive{}, fmt.Errorf("filename does not match '<chart-name>-<version>.tgz'")
 	}
 	filenameName := match[1]
 	filenameVersion := normalizeVersion(match[2])
 	metadata, err := readMetadata(path)
 	if err != nil {
-		return Chart{}, err
+		return archive{}, err
 	}
 	if metadata.Name != filenameName || normalizeVersion(metadata.Version) != filenameVersion {
-		return Chart{}, fmt.Errorf("filename metadata does not match Chart.yaml")
+		return archive{}, fmt.Errorf("filename metadata does not match Chart.yaml")
 	}
 	file, err := os.Open(path)
 	if err != nil {
-		return Chart{}, err
+		return archive{}, err
 	}
 	defer file.Close()
 	hash := sha256.New()
 	if _, err := io.Copy(hash, file); err != nil {
-		return Chart{}, err
+		return archive{}, err
 	}
-	return Chart{Name: filenameName, Version: filenameVersion, Filename: filename, Path: path, Digest: hex.EncodeToString(hash.Sum(nil)), Created: modified}, nil
+	return archive{name: filenameName, version: filenameVersion, filename: filename, digest: hex.EncodeToString(hash.Sum(nil)), created: modified}, nil
 }
 
 type chartMetadata struct {
