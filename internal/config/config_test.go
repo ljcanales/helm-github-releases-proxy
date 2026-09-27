@@ -19,11 +19,11 @@ func TestLoadGitHubReleasesFlatConfiguration(t *testing.T) {
 			if cfg.Port != 8080 || cfg.CacheTTLSeconds != 60 || cfg.LogLevel != slog.LevelInfo {
 				t.Fatalf("defaults = %#v", cfg)
 			}
-			if len(cfg.Repositories) != 1 {
-				t.Fatalf("sources = %#v", cfg.Repositories)
+			if len(cfg.Sources) != 1 {
+				t.Fatalf("sources = %#v", cfg.Sources)
 			}
-			source := cfg.Repositories[0]
-			if source.Name != "github-releases" || source.Type != GitHubReleasesType || source.Owner != "acme" || source.Repo != "charts" || source.Branch != "" {
+			source := cfg.Sources[0]
+			if source.Name != "github-releases" || source.Kind != GitHubReleasesKind || source.Owner != "acme" || source.Repo != "charts" || source.Branch != "" {
 				t.Fatalf("source = %#v", source)
 			}
 		})
@@ -66,11 +66,11 @@ func TestLoadChartReleaserFlatConfiguration(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(cfg.Repositories) != 1 {
-				t.Fatalf("sources = %#v", cfg.Repositories)
+			if len(cfg.Sources) != 1 {
+				t.Fatalf("sources = %#v", cfg.Sources)
 			}
-			source := cfg.Repositories[0]
-			if source.Name != "chart-releaser" || source.Type != ChartReleaserType || source.Owner != "acme" || source.Repo != "charts" || source.Branch != tc.branch || source.GitHubToken != tc.token {
+			source := cfg.Sources[0]
+			if source.Name != "chart-releaser" || source.Kind != ChartReleaserKind || source.Owner != "acme" || source.Repo != "charts" || source.Branch != tc.branch || source.GitHubToken != tc.token {
 				t.Fatalf("source = %#v", source)
 			}
 		})
@@ -87,13 +87,13 @@ func TestLoadGitHubModesWithOptionalLocalAggregation(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(cfg.Repositories) != 2 {
-				t.Fatalf("sources = %#v", cfg.Repositories)
+			if len(cfg.Sources) != 2 {
+				t.Fatalf("sources = %#v", cfg.Sources)
 			}
-			if cfg.Repositories[0].Name != mode || cfg.Repositories[0].Type != RepositoryType(mode) {
-				t.Fatalf("GitHub source = %#v", cfg.Repositories[0])
+			if cfg.Sources[0].Name != mode || cfg.Sources[0].Kind != SourceKind(mode) {
+				t.Fatalf("GitHub source = %#v", cfg.Sources[0])
 			}
-			if local := cfg.Repositories[1]; local.Name != "local" || local.Type != LocalDirectoryType || local.Path != path {
+			if local := cfg.Sources[1]; local.Name != "local" || local.Kind != LocalSourceKind || local.Path != path {
 				t.Fatalf("local source = %#v", local)
 			}
 		})
@@ -106,8 +106,8 @@ func TestLoadGitHubModesWithOptionalLocalAggregation(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if len(cfg.Repositories) != 1 || cfg.Repositories[0].Name != mode {
-					t.Fatalf("sources = %#v", cfg.Repositories)
+				if len(cfg.Sources) != 1 || cfg.Sources[0].Name != mode {
+					t.Fatalf("sources = %#v", cfg.Sources)
 				}
 			}
 		})
@@ -144,11 +144,11 @@ func TestLoadLocalOnlyConfiguration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cfg.Repositories) != 1 {
-		t.Fatalf("sources = %#v", cfg.Repositories)
+	if len(cfg.Sources) != 1 {
+		t.Fatalf("sources = %#v", cfg.Sources)
 	}
-	source := cfg.Repositories[0]
-	if source.Name != "local" || source.Type != LocalDirectoryType || source.Path != path || source.Owner != "" || source.Repo != "" || source.Branch != "" || source.GitHubToken != "" {
+	source := cfg.Sources[0]
+	if source.Name != "local" || source.Kind != LocalSourceKind || source.Path != path || source.Owner != "" || source.Repo != "" || source.Branch != "" || source.GitHubToken != "" {
 		t.Fatalf("source = %#v", source)
 	}
 }

@@ -10,9 +10,9 @@ import (
 	"syscall"
 	"time"
 
+	"helm-github-releases-proxy/internal/app"
 	"helm-github-releases-proxy/internal/config"
 	githubclient "helm-github-releases-proxy/internal/github"
-	"helm-github-releases-proxy/internal/startup"
 )
 
 func main() {
@@ -22,7 +22,7 @@ func main() {
 		logger.Error("invalid configuration", "error", configErr)
 	}
 
-	service := startup.New(cfg, configErr, logger, githubclient.NewClient(nil), time.Now, context.Background())
+	service := app.New(cfg, configErr, logger, githubclient.NewClient(nil), time.Now, context.Background())
 	service.Start()
 	server := &http.Server{
 		Addr:    ":" + itoa(cfg.Port),
