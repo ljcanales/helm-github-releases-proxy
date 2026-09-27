@@ -27,8 +27,8 @@ func New(name, directory string, logger *slog.Logger) *Source {
 	return &Source{name: name, directory: directory, logger: logger}
 }
 
-func (source *Source) Discover(_ context.Context) (repository.Contribution, error) {
-	archives, skipped, err := scan(source.directory, source.logger)
+func (source *Source) Discover(ctx context.Context) (repository.Contribution, error) {
+	archives, skipped, err := scan(ctx, source.directory, source.logger)
 	if err != nil {
 		return repository.Contribution{}, localPathError{configuredPath: source.directory, err: err}
 	}
@@ -105,3 +105,5 @@ func (err localPathError) Error() string {
 }
 
 func (err localPathError) Unwrap() error { return err.err }
+
+func (err localPathError) DiagnosticError() error { return err.err }

@@ -10,6 +10,7 @@ import (
 
 	"helm-github-releases-proxy/internal/config"
 	"helm-github-releases-proxy/internal/httpapi"
+	"helm-github-releases-proxy/internal/logging"
 	"helm-github-releases-proxy/internal/repository"
 	"helm-github-releases-proxy/internal/source/chartreleaser"
 	"helm-github-releases-proxy/internal/source/githubreleases"
@@ -43,7 +44,7 @@ type Runtime struct {
 	Handler     http.Handler
 	repository  *repository.Service
 	configValid bool
-	logger      *slog.Logger
+	events      logging.Logger
 }
 
 func New(cfg config.Config, configErr error, logger *slog.Logger, github GitHubBackend, now func() time.Time, refreshContext context.Context, options ...Option) *Runtime {
@@ -51,13 +52,16 @@ func New(cfg config.Config, configErr error, logger *slog.Logger, github GitHubB
 	for _, option := range options {
 		option(&assembled)
 	}
-	servedRepository := repository.New(assembled.sources, repository.WithTTL(time.Duration(cfg.CacheTTLSeconds)*time.Second), repository.WithClock(now), repository.WithRefreshContext(refreshContext))
-	return &Runtime{Handler: httpapi.NewPublished(servedRepository, configErr == nil).Handler(), repository: servedRepository, configValid: configErr == nil, logger: logger}
+	events := logging.New(logger)
+	servedRepository := repository.New(assembled.sources, repository.WithTTL(time.Duration(cfg.CacheTTLSeconds)*time.Second), repository.WithClock(now), repository.WithRefreshContext(refreshContext), repository.WithLogger(events))
+	return &Runtime{Handler: httpapi.LogRequests(httpapi.NewPublished(servedRepository, configErr == nil).Handler(), events), repository: servedRepository, configValid: configErr == nil, events: events}
 }
 
 func (runtime *Runtime) Start() {
 	if runtime.configValid {
-		runtime.repository.Start(func(err error) { runtime.logger.Warn("index startup warm failed", "error", err) })
+		runtime.repository.Start(func(err error) {
+			runtime.events.Warn(context.Background(), "index startup warm failed", "error", err)
+		})
 	}
 }
 

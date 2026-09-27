@@ -1,9 +1,14 @@
 package repository_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"helm-github-releases-proxy/internal/logging"
 	"io"
+	"log/slog"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -258,7 +263,8 @@ func TestFirstPartialPublicationContainsOnlySuccessfulContributions(t *testing.T
 	bad := repository.Source{Config: repository.SourceConfig{Name: "bad", Kind: "test"}, Discovery: discoveryFunc(func(context.Context) (repository.Contribution, error) {
 		return contribution("bad", "1.0.0", packageAt("charts/bad/bad.tgz", "bad")), errors.New("failed")
 	}), Packages: badOpener}
-	service := repository.New(repository.Sources{good, bad})
+	var output bytes.Buffer
+	service := repository.New(repository.Sources{good, bad}, repository.WithLogger(logging.New(logging.NewJSON(&output, slog.LevelInfo))))
 
 	index, err := service.Index()
 	if err != nil {
@@ -272,6 +278,16 @@ func TestFirstPartialPublicationContainsOnlySuccessfulContributions(t *testing.T
 	}
 	if badOpener.Calls() != 0 {
 		t.Fatalf("failed source opener calls = %d", badOpener.Calls())
+	}
+
+	events := decodeRefreshEvents(t, output.Bytes())
+	if len(events) != 1 || events[0]["result"] != "partial" || events[0]["level"] != "WARN" {
+		t.Fatalf("events = %#v", events)
+	}
+	sources := events[0]["sources"].([]any)
+	failed := sources[1].(map[string]any)
+	if failed["name"] != "bad" || failed["status"] != "failed" || failed["indexed_count"] != float64(0) || failed["skipped_count"] != float64(0) || failed["error"] != "failed" {
+		t.Fatalf("failed source = %#v", failed)
 	}
 }
 
@@ -291,7 +307,8 @@ func TestFreshPublicationIsReusedAndStartupWarmRunsOnceAsynchronously(t *testing
 		}
 		return contribution("widget", "1.0.0", packageAt("charts/assembled/widget.tgz", "ref")), nil
 	})
-	service := repository.New(repository.Sources{{Config: repository.SourceConfig{Name: "assembled", Kind: "test"}, Discovery: discovery, Packages: &recordingOpener{}}}, repository.WithTTL(time.Minute))
+	var output bytes.Buffer
+	service := repository.New(repository.Sources{{Config: repository.SourceConfig{Name: "assembled", Kind: "test"}, Discovery: discovery, Packages: &recordingOpener{}}}, repository.WithTTL(time.Minute), repository.WithLogger(logging.New(logging.NewJSON(&output, slog.LevelInfo))))
 
 	returned := make(chan struct{})
 	go func() {
@@ -305,22 +322,32 @@ func TestFreshPublicationIsReusedAndStartupWarmRunsOnceAsynchronously(t *testing
 		t.Fatal("Start waited for discovery")
 	}
 	<-started
+	results := make(chan error, 2)
+	for range 2 {
+		go func() { _, err := service.Index(); results <- err }()
+	}
 	close(release)
-
-	deadline := time.After(time.Second)
-	for {
-		if service.Status().CachePresent {
-			break
-		}
+	// Index returns after the shared build emits its event, so these receives
+	// are a completion barrier for both discovery and logging.
+	for range 2 {
 		select {
-		case <-deadline:
-			t.Fatal("startup publication did not complete")
-		default:
-			time.Sleep(time.Millisecond)
+		case err := <-results:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("index did not complete after startup discovery")
 		}
 	}
-	if _, err := service.Index(); err != nil {
-		t.Fatal(err)
+	events := decodeRefreshEvents(t, output.Bytes())
+	if len(events) != 1 || events[0]["result"] != "published" || events[0]["level"] != "INFO" {
+		t.Fatalf("events = %#v", events)
+	}
+	for _, key := range []string{"trace_id", "refresh_id"} {
+		value, _ := events[0][key].(string)
+		if !regexp.MustCompile(`^[0-9a-f]{32}$`).MatchString(value) {
+			t.Fatalf("%s = %q", key, value)
+		}
 	}
 	mu.Lock()
 	defer mu.Unlock()
@@ -425,3 +452,94 @@ func packageAt(path, key string) repository.DiscoveredPackage {
 }
 
 func fixedClock() time.Time { return time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC) }
+
+func TestRefreshEventsReportOutcomesAndSkipCacheHits(t *testing.T) {
+	var output bytes.Buffer
+	now := fixedClock()
+	fail := false
+	source := repository.Source{Config: repository.SourceConfig{Name: "source", Kind: "test"}, Discovery: discoveryFunc(func(context.Context) (repository.Contribution, error) {
+		if fail {
+			return repository.Contribution{IndexedCount: 99, SkippedCount: 99}, errors.New("Get https://user:password@secret.example/chart?token=private: failed")
+		}
+		return repository.Contribution{IndexedCount: 2, SkippedCount: 3}, nil
+	})}
+	service := repository.New(repository.Sources{source}, repository.WithClock(func() time.Time { return now }), repository.WithTTL(time.Minute), repository.WithLogger(logging.New(logging.NewJSON(&output, slog.LevelInfo))))
+	for _, step := range []struct {
+		trace  string
+		expire bool
+		count  int
+	}{{"first", false, 1}, {"cached", false, 1}, {"stale", true, 2}} {
+		if step.expire {
+			now = now.Add(61 * time.Second)
+			fail = true
+		}
+		if _, err := service.IndexContext(logging.WithTraceID(context.Background(), step.trace)); err != nil {
+			t.Fatal(err)
+		}
+		if events := decodeRefreshEvents(t, output.Bytes()); len(events) != step.count {
+			t.Fatalf("%s events = %#v", step.trace, events)
+		}
+	}
+	events := decodeRefreshEvents(t, output.Bytes())
+	for i, expected := range []struct{ result, level, trace string }{{"published", "INFO", "first"}, {"stale_retained", "WARN", "stale"}} {
+		event := events[i]
+		if event["result"] != expected.result || event["level"] != expected.level || event["trace_id"] != expected.trace {
+			t.Fatalf("event = %#v", event)
+		}
+		id, _ := event["refresh_id"].(string)
+		if !regexp.MustCompile(`^[0-9a-f]{32}$`).MatchString(id) {
+			t.Fatalf("refresh ID = %q", id)
+		}
+		if _, ok := event["duration_ms"].(float64); !ok {
+			t.Fatalf("missing duration: %#v", event)
+		}
+	}
+	if events[0]["refresh_id"] == events[1]["refresh_id"] {
+		t.Fatal("refresh ID reused")
+	}
+	accepted := events[0]["sources"].([]any)[0].(map[string]any)
+	failed := events[1]["sources"].([]any)[0].(map[string]any)
+	if accepted["indexed_count"] != float64(2) || accepted["skipped_count"] != float64(3) {
+		t.Fatalf("accepted source = %#v", accepted)
+	}
+	if failed["name"] != "source" || failed["status"] != "failed" || failed["indexed_count"] != float64(0) || failed["skipped_count"] != float64(0) || failed["error"] == nil {
+		t.Fatalf("failed source = %#v", failed)
+	}
+	if strings.Contains(output.String(), "private") || strings.Contains(output.String(), "password") {
+		t.Fatalf("unsafe log: %s", output.String())
+	}
+}
+
+func TestRefreshRetainsServiceContextWhenCallerIsCanceled(t *testing.T) {
+	var output bytes.Buffer
+	service := repository.New(repository.Sources{{Config: repository.SourceConfig{Name: "source", Kind: "test"}, Discovery: discoveryFunc(func(ctx context.Context) (repository.Contribution, error) {
+		return repository.Contribution{}, ctx.Err()
+	})}}, repository.WithLogger(logging.New(logging.NewJSON(&output, slog.LevelInfo))))
+	ctx, cancel := context.WithCancel(logging.WithTraceID(context.Background(), "caller"))
+	cancel()
+	if _, err := service.IndexContext(ctx); err != nil {
+		t.Fatal(err)
+	}
+	events := decodeRefreshEvents(t, output.Bytes())
+	if len(events) != 1 || events[0]["result"] != "published" || events[0]["trace_id"] != "caller" {
+		t.Fatalf("events = %#v", events)
+	}
+}
+
+func decodeRefreshEvents(t *testing.T, data []byte) []map[string]any {
+	t.Helper()
+	var events []map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	for {
+		var event map[string]any
+		if err := decoder.Decode(&event); err == io.EOF {
+			return events
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		if event["msg"] != "repository.refresh.completed" {
+			t.Fatalf("unexpected event: %#v", event)
+		}
+		events = append(events, event)
+	}
+}

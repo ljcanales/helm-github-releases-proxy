@@ -11,6 +11,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"helm-github-releases-proxy/internal/chart"
+	githubclient "helm-github-releases-proxy/internal/github"
 	"helm-github-releases-proxy/internal/repository"
 )
 
@@ -40,7 +41,7 @@ func New(name, owner, repo, branch string, backend Backend, options ...Option) *
 }
 
 func (source *Source) Discover(ctx context.Context) (repository.Contribution, error) {
-	file, err := source.backend.FetchBranchFile(ctx, source.owner, source.repo, source.branch, "index.yaml", source.token)
+	file, err := source.backend.FetchBranchFile(githubclient.WithSource(ctx, source.name), source.owner, source.repo, source.branch, "index.yaml", source.token)
 	if err != nil {
 		return repository.Contribution{}, err
 	}
@@ -133,9 +134,9 @@ func (source *Source) OpenPackage(ctx context.Context, reference repository.Pack
 	var body io.ReadCloser
 	var err error
 	if parts[0] == "package-in-branch" {
-		body, err = source.backend.FetchBranchFile(ctx, source.owner, source.repo, source.branch, strings.Join(parts[1:], "/"), source.token)
+		body, err = source.backend.FetchBranchFile(githubclient.WithSource(ctx, source.name), source.owner, source.repo, source.branch, strings.Join(parts[1:], "/"), source.token)
 	} else {
-		body, err = source.backend.DownloadRelease(ctx, source.owner, source.repo, strings.Join(parts[:len(parts)-1], "/"), filename, source.token)
+		body, err = source.backend.DownloadRelease(githubclient.WithSource(ctx, source.name), source.owner, source.repo, strings.Join(parts[:len(parts)-1], "/"), filename, source.token)
 	}
 	if err != nil {
 		return repository.ChartPackage{}, err

@@ -5,10 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
+
+	"helm-github-releases-proxy/internal/logging"
 )
 
 const apiBaseURL = "https://api.github.com"
@@ -31,10 +34,21 @@ type Asset struct {
 type Client struct {
 	httpClient *http.Client
 	baseURL    string
+	events     logging.Logger
 }
 
-func NewClient(httpClient *http.Client) *Client {
-	return &Client{httpClient: httpClient, baseURL: apiBaseURL}
+func NewClient(httpClient *http.Client, loggers ...*slog.Logger) *Client {
+	logger := slog.Default()
+	if len(loggers) > 0 && loggers[0] != nil {
+		logger = loggers[0]
+	}
+	return &Client{httpClient: httpClient, baseURL: apiBaseURL, events: logging.New(logger)}
+}
+
+type sourceKey struct{}
+
+func WithSource(ctx context.Context, source string) context.Context {
+	return context.WithValue(ctx, sourceKey{}, source)
 }
 
 func (c *Client) ListReleases(ctx context.Context, owner, repository, token string) ([]Release, error) {
@@ -42,7 +56,7 @@ func (c *Client) ListReleases(ctx context.Context, owner, repository, token stri
 	if err != nil {
 		return nil, err
 	}
-	response, err := c.client(apiTimeout).Do(request)
+	response, err := c.do(request, apiTimeout, "list_releases")
 	if err != nil {
 		return nil, fmt.Errorf("list GitHub releases: %w", err)
 	}
@@ -64,7 +78,7 @@ func (c *Client) DownloadAsset(ctx context.Context, owner, repository string, as
 		return nil, err
 	}
 	request.Header.Set("Accept", "application/octet-stream")
-	response, err := c.client(downloadTimeout).Do(request)
+	response, err := c.do(request, downloadTimeout, "download_asset")
 	if err != nil {
 		return nil, fmt.Errorf("download GitHub release asset: %w", err)
 	}
@@ -83,7 +97,7 @@ func (c *Client) DownloadRelease(ctx context.Context, owner, repository, tag, fi
 	request.URL.Scheme = "https"
 	request.URL.Host = "github.com"
 	request.Header.Set("Accept", "application/octet-stream")
-	response, err := c.client(downloadTimeout).Do(request)
+	response, err := c.do(request, downloadTimeout, "download_release")
 	if err != nil {
 		return nil, fmt.Errorf("download GitHub release package: %w", err)
 	}
@@ -106,7 +120,7 @@ func (c *Client) FetchBranchFile(ctx context.Context, owner, repository, branch,
 	query := request.URL.Query()
 	query.Set("ref", branch)
 	request.URL.RawQuery = query.Encode()
-	response, err := c.client(downloadTimeout).Do(request)
+	response, err := c.do(request, downloadTimeout, "fetch_branch_file")
 	if err != nil {
 		return nil, fmt.Errorf("fetch GitHub branch file: %w", err)
 	}
@@ -135,6 +149,47 @@ func (c *Client) client(timeout time.Duration) *http.Client {
 		return c.httpClient
 	}
 	return &http.Client{Timeout: timeout}
+}
+
+func (c *Client) do(request *http.Request, timeout time.Duration, operation string) (*http.Response, error) {
+	originalURL := request.URL.String()
+	client := *c.client(timeout)
+	transport := client.Transport
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	observed := &finalHostTransport{next: transport}
+	client.Transport = observed
+	started := time.Now()
+	response, err := client.Do(request)
+	duration := time.Since(started)
+	err = logging.ProtectError(err, strings.TrimPrefix(request.Header.Get("Authorization"), "Bearer "))
+	outcome := logging.HTTPClientResponse{
+		Method: request.Method, URL: originalURL, Duration: duration,
+		FinalScheme: observed.scheme, FinalHost: observed.host, Error: err}
+	if response != nil {
+		outcome.Status = response.StatusCode
+	}
+	c.events.HTTPClientCompleted(request.Context(), "github.request.completed", outcome,
+		"source", sourceName(request.Context()), "operation", operation)
+	return response, err
+}
+
+func sourceName(ctx context.Context) string {
+	source, _ := ctx.Value(sourceKey{}).(string)
+	return source
+}
+
+// Each operation owns its wrapper, so redirects can update these fields without
+// sharing state with concurrent requests on the underlying transport.
+type finalHostTransport struct {
+	next         http.RoundTripper
+	scheme, host string
+}
+
+func (transport *finalHostTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	transport.scheme, transport.host = request.URL.Scheme, request.URL.Host
+	return transport.next.RoundTrip(request)
 }
 
 func checkResponse(response *http.Response) error {
