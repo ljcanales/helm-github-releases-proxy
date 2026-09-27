@@ -13,10 +13,10 @@ import (
 	"helm-github-releases-proxy/internal/repository"
 )
 
-func TestRuntimeHealthReadinessAndConfigurationOnlyStatus(t *testing.T) {
+func TestRuntimeLivenessReadinessAndConfigurationOnlyStatus(t *testing.T) {
 	valid := app.New(config.Config{CacheTTLSeconds: 60}, nil, discardLogger(), nil, fixedClock, context.Background())
-	if response := request(valid.Handler, http.MethodGet, "http://example.test/healthz"); response.Code != http.StatusOK || response.Body.String() != `{"status":"ok"}` {
-		t.Fatalf("health = %d %q", response.Code, response.Body.String())
+	if response := request(valid.Handler, http.MethodGet, "http://example.test/livez"); response.Code != http.StatusOK || response.Body.String() != `{"status":"ok"}` {
+		t.Fatalf("liveness = %d %q", response.Code, response.Body.String())
 	}
 	if response := request(valid.Handler, http.MethodGet, "http://example.test/readyz"); response.Code != http.StatusOK || response.Body.String() != `{"status":"ok"}` {
 		t.Fatalf("valid readiness = %d %q", response.Code, response.Body.String())
@@ -27,8 +27,8 @@ func TestRuntimeHealthReadinessAndConfigurationOnlyStatus(t *testing.T) {
 	}
 
 	invalid := app.New(config.Config{}, errors.New("invalid configuration"), discardLogger(), nil, fixedClock, context.Background())
-	if response := request(invalid.Handler, http.MethodGet, "http://example.test/healthz"); response.Code != http.StatusOK {
-		t.Fatalf("invalid health = %d", response.Code)
+	if response := request(invalid.Handler, http.MethodGet, "http://example.test/livez"); response.Code != http.StatusOK {
+		t.Fatalf("invalid liveness = %d", response.Code)
 	}
 	if response := request(invalid.Handler, http.MethodGet, "http://example.test/readyz"); response.Code != http.StatusServiceUnavailable || response.Body.String() != `{"status":"not_ready"}` {
 		t.Fatalf("invalid readiness = %d %q", response.Code, response.Body.String())

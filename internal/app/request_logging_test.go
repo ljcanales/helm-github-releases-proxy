@@ -32,7 +32,7 @@ func TestAssembledRequestEvents(t *testing.T) {
 		name, target, path string
 		status             int
 	}{
-		{"health", "/healthz?token=secret", "/healthz", http.StatusOK},
+		{"liveness", "/livez?token=secret", "/livez", http.StatusOK},
 		{"ready", "/readyz", "/readyz", http.StatusOK},
 		{"status", "/status", "/status", http.StatusOK},
 		{"index", "/index.yaml", "/index.yaml", http.StatusOK},

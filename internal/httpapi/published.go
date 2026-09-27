@@ -59,7 +59,7 @@ func NewPublished(operations PublishedOperations, configValid bool) *PublishedSe
 
 func (service *PublishedService) Handler() http.Handler {
 	router := chi.NewRouter()
-	router.Get("/healthz", service.health)
+	router.Get("/livez", service.live)
 	router.Get("/readyz", service.ready)
 	router.Get("/index.yaml", service.index)
 	router.Get("/status", service.status)
@@ -67,7 +67,7 @@ func (service *PublishedService) Handler() http.Handler {
 	return router
 }
 
-func (service *PublishedService) health(writer http.ResponseWriter, _ *http.Request) {
+func (service *PublishedService) live(writer http.ResponseWriter, _ *http.Request) {
 	writeJSON(writer, http.StatusOK, `{"status":"ok"}`)
 }
 
